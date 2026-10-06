@@ -71,21 +71,23 @@ return function(deps)
 				continue
 			end
 
-			-- Walk/fly to stand-off range before aiming: mining is close range.
+			-- Rocks are huge - the "MarsRocks" union is 63 studs across - so the
+			-- stand-off must be measured from the rock's EDGE, not its centre.
+			-- Standing a fixed distance from the centre parks the character
+			-- inside the rock, and a swing fired from inside the geometry never
+			-- mines: the server answers the remote but nothing breaks.
+			local half = math.max(rock.Size.X, rock.Size.Y, rock.Size.Z) / 2
+			local standOff = half + config.farm.edgeMargin
 			local dist = util.dist(root.Position, rock.Position)
-			if dist > config.farm.aimDistance + 10 then
-				-- Step the character toward the rock using root velocity so we do
-				-- not need a path: open lunar terrain with noclip-friendly gaps.
-				local dir = (rock.Position - root.Position).Unit
-				root.CFrame = CFrame.lookAt(root.Position, Vector3.new(rock.Position.X, root.Position.Y, rock.Position.Z))
-				local steps = math.min(6, math.ceil((dist - config.farm.aimDistance) / 20))
-				for _ = 1, steps do
-					if not running or not util.alive() then
-						break
-					end
-					root.CFrame = root.CFrame + (dir * 8)
-					task.wait(0.05)
-				end
+
+			if dist > standOff + 6 then
+				-- Keep the side we are already on and hop straight there. The
+				-- game has no movement check, and creeping 8 studs at a time
+				-- across a 300-stud field spends the whole wave walking.
+				local side = root.Position - rock.Position
+				side = if side.Magnitude > 1 then side.Unit else Vector3.new(0, 0, 1)
+				root.CFrame = CFrame.new(rock.Position + side * standOff + Vector3.new(0, 6, 0))
+				task.wait(0.35)
 				continue
 			end
 
@@ -100,7 +102,9 @@ return function(deps)
 				continue
 			end
 
-			local ok = util.aimAt(rock.Position)
+			-- Camera stand-off is wider still, so the view starts outside the
+			-- rock and the ray through the mouse lands on its surface.
+			local ok = util.aimAt(rock.Position, half + 40)
 			if not ok then
 				task.wait(0.3)
 				continue

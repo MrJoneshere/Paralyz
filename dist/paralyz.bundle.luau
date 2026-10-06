@@ -74,9 +74,11 @@ return function(deps)
 				continue
 			end
 
-			-- Aim at the monster the same way mining aims at a rock, then swing.
+			-- Aim at the monster the same way mining aims at a rock - stand off
+			-- from its edge, not its pivot - then swing.
 			local pivot = monster:GetPivot().Position
-			util.aimAt(pivot, 8)
+			local size = monster:GetExtentsSize()
+			util.aimAt(pivot, math.max(size.X, size.Y, size.Z) / 2 + 20)
 			pcall(function()
 				sword:Activate()
 			end)
@@ -246,6 +248,8 @@ return {
 		noRockDelay = 4,
 		-- Grace after equipping a tool before the first swing.
 		equipDelay = 0.25,
+		-- How far past a rock's edge to stand while swinging it.
+		edgeMargin = 14,
 		-- Hard stop for test runs. The GUI never passes this; only tests do.
 		testCycles = 5,
 	},
@@ -631,21 +635,23 @@ return function(deps)
 				continue
 			end
 
-			-- Walk/fly to stand-off range before aiming: mining is close range.
+			-- Rocks are huge - the "MarsRocks" union is 63 studs across - so the
+			-- stand-off must be measured from the rock's EDGE, not its centre.
+			-- Standing a fixed distance from the centre parks the character
+			-- inside the rock, and a swing fired from inside the geometry never
+			-- mines: the server answers the remote but nothing breaks.
+			local half = math.max(rock.Size.X, rock.Size.Y, rock.Size.Z) / 2
+			local standOff = half + config.farm.edgeMargin
 			local dist = util.dist(root.Position, rock.Position)
-			if dist > config.farm.aimDistance + 10 then
-				-- Step the character toward the rock using root velocity so we do
-				-- not need a path: open lunar terrain with noclip-friendly gaps.
-				local dir = (rock.Position - root.Position).Unit
-				root.CFrame = CFrame.lookAt(root.Position, Vector3.new(rock.Position.X, root.Position.Y, rock.Position.Z))
-				local steps = math.min(6, math.ceil((dist - config.farm.aimDistance) / 20))
-				for _ = 1, steps do
-					if not running or not util.alive() then
-						break
-					end
-					root.CFrame = root.CFrame + (dir * 8)
-					task.wait(0.05)
-				end
+
+			if dist > standOff + 6 then
+				-- Keep the side we are already on and hop straight there. The
+				-- game has no movement check, and creeping 8 studs at a time
+				-- across a 300-stud field spends the whole wave walking.
+				local side = root.Position - rock.Position
+				side = if side.Magnitude > 1 then side.Unit else Vector3.new(0, 0, 1)
+				root.CFrame = CFrame.new(rock.Position + side * standOff + Vector3.new(0, 6, 0))
+				task.wait(0.35)
 				continue
 			end
 
@@ -660,7 +666,9 @@ return function(deps)
 				continue
 			end
 
-			local ok = util.aimAt(rock.Position)
+			-- Camera stand-off is wider still, so the view starts outside the
+			-- rock and the ray through the mouse lands on its surface.
+			local ok = util.aimAt(rock.Position, half + 40)
 			if not ok then
 				task.wait(0.3)
 				continue
@@ -988,6 +996,20 @@ return function(deps)
 		return out
 	end
 
+	-- Land on the surface, not inside the body: planet "Center" parts are the
+	-- planet itself, so dropping the player at centre + 8 starts them inside
+	-- the ground and they fall. Raycast down from above instead.
+	local function surfacePosition(pos: Vector3): Vector3
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { util.character() }
+		local hit = workspace:Raycast(pos + Vector3.new(0, 600, 0), Vector3.new(0, -1500, 0), params)
+		if hit then
+			return hit.Position + Vector3.new(0, 5, 0)
+		end
+		return pos + Vector3.new(0, 10, 0)
+	end
+
 	function travel.to(name: string): boolean
 		for _, d in ipairs(travel.destinations) do
 			if d.name == name then
@@ -1000,7 +1022,7 @@ return function(deps)
 				if not root then
 					return false
 				end
-				root.CFrame = CFrame.new(pos + Vector3.new(0, 8, 0))
+				root.CFrame = CFrame.new(surfacePosition(pos))
 				return true
 			end
 		end
@@ -1577,6 +1599,10 @@ return function(deps)
 	end
 
 	-- Returns true when the camera is locked on and the mouse sees the target.
+	-- Accepts either the exact part (any hit on it puts the part's own position
+	-- under the cursor, which matches to the millimetre) or a bare position
+	-- such as a monster pivot, where a small tolerance is right. Comparing the
+	-- instance against the Vector3 - the bug this replaced - is always false.
 	function util.aimAt(targetPos: Vector3?, standOff: number?): boolean
 		local target = targetPos or (util.root() and util.root().Position)
 		if not target then
@@ -1592,7 +1618,11 @@ return function(deps)
 			cam.CFrame = cf
 		end)
 		task.wait() -- let the frame land so Mouse.Target refreshes
-		return util.mouseTarget() == target
+		local mt = util.mouseTarget()
+		if not mt then
+			return false
+		end
+		return (mt.Position - target).Magnitude <= 12
 	end
 
 	function util.mouseTarget(): BasePart?

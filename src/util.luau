@@ -315,6 +315,10 @@ return function(deps)
 	end
 
 	-- Returns true when the camera is locked on and the mouse sees the target.
+	-- Accepts either the exact part (any hit on it puts the part's own position
+	-- under the cursor, which matches to the millimetre) or a bare position
+	-- such as a monster pivot, where a small tolerance is right. Comparing the
+	-- instance against the Vector3 - the bug this replaced - is always false.
 	function util.aimAt(targetPos: Vector3?, standOff: number?): boolean
 		local target = targetPos or (util.root() and util.root().Position)
 		if not target then
@@ -330,7 +334,11 @@ return function(deps)
 			cam.CFrame = cf
 		end)
 		task.wait() -- let the frame land so Mouse.Target refreshes
-		return util.mouseTarget() == target
+		local mt = util.mouseTarget()
+		if not mt then
+			return false
+		end
+		return (mt.Position - target).Magnitude <= 12
 	end
 
 	function util.mouseTarget(): BasePart?

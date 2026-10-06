@@ -18,6 +18,8 @@ return {
 		noRockDelay = 4,
 		-- Grace after equipping a tool before the first swing.
 		equipDelay = 0.25,
+		-- How far past a rock's edge to stand while swinging it.
+		edgeMargin = 14,
 		-- Hard stop for test runs. The GUI never passes this; only tests do.
 		testCycles = 5,
 	},

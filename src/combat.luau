@@ -59,9 +59,11 @@ return function(deps)
 				continue
 			end
 
-			-- Aim at the monster the same way mining aims at a rock, then swing.
+			-- Aim at the monster the same way mining aims at a rock - stand off
+			-- from its edge, not its pivot - then swing.
 			local pivot = monster:GetPivot().Position
-			util.aimAt(pivot, 8)
+			local size = monster:GetExtentsSize()
+			util.aimAt(pivot, math.max(size.X, size.Y, size.Z) / 2 + 20)
 			pcall(function()
 				sword:Activate()
 			end)

@@ -82,6 +82,20 @@ return function(deps)
 		return out
 	end
 
+	-- Land on the surface, not inside the body: planet "Center" parts are the
+	-- planet itself, so dropping the player at centre + 8 starts them inside
+	-- the ground and they fall. Raycast down from above instead.
+	local function surfacePosition(pos: Vector3): Vector3
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { util.character() }
+		local hit = workspace:Raycast(pos + Vector3.new(0, 600, 0), Vector3.new(0, -1500, 0), params)
+		if hit then
+			return hit.Position + Vector3.new(0, 5, 0)
+		end
+		return pos + Vector3.new(0, 10, 0)
+	end
+
 	function travel.to(name: string): boolean
 		for _, d in ipairs(travel.destinations) do
 			if d.name == name then
@@ -94,7 +108,7 @@ return function(deps)
 				if not root then
 					return false
 				end
-				root.CFrame = CFrame.new(pos + Vector3.new(0, 8, 0))
+				root.CFrame = CFrame.new(surfacePosition(pos))
 				return true
 			end
 		end
