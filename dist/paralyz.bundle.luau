@@ -1435,7 +1435,9 @@ return function(deps)
 	end
 
 	-------------------------------------------------------------------- rocks
-	-- Rocks live under Workspace.Planets.Planet<N>.Rocks and spawn in waves.
+	-- Rocks live in a folder called "Rocks" somewhere under each planet - on
+	-- some planets it is a direct child, on others it hangs off the planet's
+	-- Center part - and the server fills it in waves.
 	function util.rocks(): { BasePart }
 		local out = {}
 		local planets = workspace:FindFirstChild("Planets")
@@ -1443,11 +1445,12 @@ return function(deps)
 			return out
 		end
 		for _, planet in ipairs(planets:GetChildren()) do
-			local folder = planet:FindFirstChild("Rocks")
-			if folder then
-				for _, rock in ipairs(folder:GetChildren()) do
-					if rock:IsA("BasePart") then
-						table.insert(out, rock)
+			for _, inst in ipairs(planet:GetDescendants()) do
+				if inst:IsA("Folder") and inst.Name == "Rocks" then
+					for _, rock in ipairs((inst :: Folder):GetChildren()) do
+						if rock:IsA("BasePart") then
+							table.insert(out, rock)
+						end
 					end
 				end
 			end
