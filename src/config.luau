@@ -37,6 +37,10 @@ return {
 		-- pickaxe signature - still fixes at the flat floor.
 		stallSwings = 10,
 		rockSwitchDelay = 20,
+		-- An outside move (event gathering players, cutscene, server warp)
+		-- released the stance pin: pause this long before re-planning so
+		-- the farm does not teleport out of a story event mid-flight.
+		externalPause = 20,
 
 		-- No rocks anywhere near the character: after this many empty waits
 		-- the farm probes another planet.

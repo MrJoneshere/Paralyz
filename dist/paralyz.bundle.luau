@@ -348,6 +348,10 @@ return {
 		-- pickaxe signature - still fixes at the flat floor.
 		stallSwings = 10,
 		rockSwitchDelay = 20,
+		-- An outside move (event gathering players, cutscene, server warp)
+		-- released the stance pin: pause this long before re-planning so
+		-- the farm does not teleport out of a story event mid-flight.
+		externalPause = 20,
 
 		-- No rocks anywhere near the character: after this many empty waits
 		-- the farm probes another planet.
@@ -874,6 +878,16 @@ return function(deps)
 	-- write, re-applying every RenderStepped frame is what was proven to hold.
 	local holdCF: CFrame? = nil
 	local holdConn: RBXScriptConnection? = nil
+	-- The stance pin writes root.CFrame every frame, so a large gap between
+	-- the pin target and the real position means somebody else moved us:
+	-- an event gathering players, a cutscene, a server warp (observed live:
+	-- the Io arrival carried the character 16k studs mid-idle). Fighting
+	-- those frame by frame breaks the event, so the farm releases the pin
+	-- and the aim, pauses, and re-plans from wherever it ended up. The
+	-- flag marks the one legitimate large one-frame gap: switching stance
+	-- to a far rock (root still stands at the old one until the pin runs).
+	local stanceJustSet = false
+	local externalUntil = 0
 
 	-- metrics (the menu shows these through farm.stats())
 	local cycles = 0 -- swings sent
@@ -950,12 +964,28 @@ return function(deps)
 		end
 		holdConn = util.RunService.RenderStepped:Connect(function()
 			local cf = holdCF
-			if cf then
-				local root = util.root()
-				if root then
-					root.CFrame = cf
-				end
+			if not cf then
+				return
 			end
+			local root = util.root()
+			if not root then
+				return
+			end
+			local expectStance = stanceJustSet
+			stanceJustSet = false
+			if not expectStance and (root.CFrame.Position - cf.Position).Magnitude > 500 then
+				-- Somebody else moved us while we were pinning. Adopt the
+				-- new position instead of snapping back: release stance and
+				-- aim, pause the loop, and re-plan from here afterwards.
+				holdCF = nil
+				util.stopAim()
+				externalUntil = os.clock() + config.farm.externalPause
+				if running then
+					report("the game moved us - pausing the farm", true)
+				end
+				return
+			end
+			root.CFrame = cf
 		end)
 	end
 
@@ -1240,6 +1270,7 @@ return function(deps)
 		avoided = {}
 		planetCool = {}
 		rotatePause = 0
+		externalUntil = 0
 		local stall = 0 -- swings since the last juice
 		local fixStage = 0
 		local emptyWaits = 0
@@ -1271,6 +1302,11 @@ return function(deps)
 			end
 			if not util.alive() then
 				setPhase("waiting to respawn")
+				task.wait(1)
+				continue
+			end
+			if os.clock() < externalUntil then
+				setPhase("paused - the game moved us")
 				task.wait(1)
 				continue
 			end
@@ -1335,6 +1371,7 @@ return function(deps)
 
 			-- Stance: hold it from here on; recomputed whenever we re-enter.
 			holdCF = stanceCFrame(rock, root.Position)
+			stanceJustSet = true
 			syncCollision() -- the hide toggle may have flipped since last pass
 			task.wait(0.15)
 
