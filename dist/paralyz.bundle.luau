@@ -291,8 +291,107 @@ return function(deps)
 		end
 	end
 
+	----------------------------------------------------- moon event roles
+	-- When a Moon event assigns a player the boss or the monster role, the
+	-- server marks the character (MoonBossPlayer / MoonMonsterPlayer) and
+	-- the game's own MoonBoss/MoonMonsterPlayerControls turn clicks into
+	-- `Events.<Role>.Attack` with the camera look vector, a per-role client
+	-- cooldown (0.35s boss / 0.65s monster) and a pulse attribute the
+	-- client animator watches to play the swing. We replay exactly that
+	-- protocol: same remote, same payload, same cooldown, same pulse.
+	-- Background-safe by construction - no input synthesis, no camera
+	-- movement; it fires where the camera already looks.
+	local moonRunning = false
+
+	local MOON_ROLES = {
+		{
+			attr = "MoonBossPlayer",
+			remote = "MoonBoss",
+			pulse = "MoonBossAttackPulse",
+			delay = config.combat.moonBossDelay,
+		},
+		{
+			-- The vanilla monster control backs off while the boss role is
+			-- held; mirror that precedence exactly.
+			attr = "MoonMonsterPlayer",
+			remote = "MoonMonster",
+			pulse = "MoonMonsterAttackPulse",
+			delay = config.combat.moonMonsterDelay,
+			requiresNot = "MoonBossPlayer",
+		},
+	}
+
+	local function moonLoop()
+		local nextFire = 0
+		while moonRunning do
+			pcall(function()
+				local character = util.character()
+				if not character then
+					return
+				end
+				local now = os.clock()
+				if now < nextFire then
+					return
+				end
+				for _, role in ipairs(MOON_ROLES) do
+					if character:GetAttribute(role.attr) == true
+						and (role.requiresNot == nil or character:GetAttribute(role.requiresNot) ~= true)
+					then
+						-- If the vanilla controls just swung (the pulse
+						-- attribute shares our os.clock domain), defer to
+						-- them: manual play keeps exactly the vanilla rate
+						-- instead of getting doubled by us.
+						local pulse = character:GetAttribute(role.pulse)
+						if typeof(pulse) == "number" and now - pulse < role.delay then
+							nextFire = math.max(nextFire, pulse + role.delay)
+							return
+						end
+						local events = util.ReplicatedStorage:FindFirstChild("Events")
+						local folder = events and events:FindFirstChild(role.remote)
+						local attack = folder and folder:FindFirstChild("Attack")
+						if not attack then
+							return
+						end
+						local cam = workspace.CurrentCamera
+						local root = util.root()
+						local dir = if cam
+							then cam.CFrame.LookVector
+							else if root then root.CFrame.LookVector else nil
+						if not dir then
+							return
+						end
+						character:SetAttribute(role.pulse, now)
+						local attackRemote = attack :: RemoteEvent
+						attackRemote:FireServer(dir)
+						nextFire = now + role.delay
+						return
+					end
+				end
+			end)
+			task.wait(0.1)
+		end
+	end
+
+	function combat.startMoon()
+		if moonRunning then
+			return false
+		end
+		moonRunning = true
+		task.spawn(moonLoop)
+		return true
+	end
+
+	function combat.stopMoon()
+		moonRunning = false
+	end
+
 	function combat.sync()
 		setAvoid(state.enabled("Avoid"))
+		if state.enabled("MoonAttack") then
+			combat.startMoon()
+		else
+			combat.stopMoon()
+		end
 		if state.enabled("GunRapid") or state.enabled("GunVolley") then
 			combat.startGuns()
 		else
@@ -302,6 +401,7 @@ return function(deps)
 
 	function combat.stop()
 		combat.stopGuns()
+		combat.stopMoon()
 		setAvoid(false)
 	end
 
@@ -418,6 +518,11 @@ return {
 		-- trigger at a slower cycle (true volley semantics).
 		hexFireRate = 0.02,
 		hexPellets = 8,
+		-- Moon boss / moon monster role swings: mirror the client cooldowns
+		-- inside the game's own MoonBoss/MoonMonsterPlayerControls so our
+		-- remote cadence is indistinguishable from a clicking player.
+		moonBossDelay = 0.35,
+		moonMonsterDelay = 0.65,
 	},
 
 	travel = {
@@ -3406,6 +3511,14 @@ ui.toggle(combatTab, "GunVolley", {
 	description = "Every rail shot sprays every monster in range; the Moon Gun switches to multi-pellet bursts. Bigger hitbox client-side - what the server kills is its call.",
 })
 
+ui.section(combatTab, "Moon event")
+
+ui.toggle(combatTab, "MoonAttack", {
+	name = "Boss & monster swings",
+	description = "When a Moon event turns you into the Moon boss or a moon monster, swings fire on their own at the game's own cooldown, aimed where your camera looks. Idle until the game assigns you the role.",
+	value = true,
+})
+
 -- Settings ---------------------------------------------------------------
 ui.section(settingsTab, "Performance")
 
@@ -3532,6 +3645,9 @@ state.on("GunRapid", function()
 	combat.sync()
 end)
 state.on("GunVolley", function()
+	combat.sync()
+end)
+state.on("MoonAttack", function()
 	combat.sync()
 end)
 

@@ -107,6 +107,11 @@ return {
 		-- trigger at a slower cycle (true volley semantics).
 		hexFireRate = 0.02,
 		hexPellets = 8,
+		-- Moon boss / moon monster role swings: mirror the client cooldowns
+		-- inside the game's own MoonBoss/MoonMonsterPlayerControls so our
+		-- remote cadence is indistinguishable from a clicking player.
+		moonBossDelay = 0.35,
+		moonMonsterDelay = 0.65,
 	},
 
 	travel = {

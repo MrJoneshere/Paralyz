@@ -274,6 +274,14 @@ ui.toggle(combatTab, "GunVolley", {
 	description = "Every rail shot sprays every monster in range; the Moon Gun switches to multi-pellet bursts. Bigger hitbox client-side - what the server kills is its call.",
 })
 
+ui.section(combatTab, "Moon event")
+
+ui.toggle(combatTab, "MoonAttack", {
+	name = "Boss & monster swings",
+	description = "When a Moon event turns you into the Moon boss or a moon monster, swings fire on their own at the game's own cooldown, aimed where your camera looks. Idle until the game assigns you the role.",
+	value = true,
+})
+
 -- Settings ---------------------------------------------------------------
 ui.section(settingsTab, "Performance")
 
@@ -400,6 +408,9 @@ state.on("GunRapid", function()
 	combat.sync()
 end)
 state.on("GunVolley", function()
+	combat.sync()
+end)
+state.on("MoonAttack", function()
 	combat.sync()
 end)
 
