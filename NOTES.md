@@ -63,13 +63,19 @@ Consequences the code respects:
 | Bunker | `725, 3033, -1332` |
 | City | `654, 3063, -1230` |
 | Sun | `464, 3101, 468` |
-| Planet1 | `741, 3028, -1821` |
-| Planet2 | `739, 6963, -10239` |
-| Planet3 | `747, 2808, 9821` |
-| Planet4 | `747, 4130, -17324` |
-| Planet5 | `342, 2975, 15713` |
-| Planet6 | `754, 3527, -35754` |
+| Planet1 = **Earth** | `741, 3028, -1821` |
+| Planet2 = **Moon** | `739, 6963, -10239` |
+| Planet3 = **Venus** | `747, 2808, 9821` |
+| Planet4 = **Mars** | `747, 4130, -17324` |
+| Planet5 = **Mercury** (user: "not sure") | `342, 2975, 15713`, observed **drifting** to `718, 4706, 10637` mid-story — matches "MERCURY HAS WAKEN UP ... HEADING TOWARDS VENUS" |
+| Planet6 = **Pluto** | `754, 3527, -35754` |
 
+- Planet↔name mapping is the user's (P5=Mercury is his guess), corroborated by the story messages
+  and `ChangeSky.EarthSky` reading Planet1 / `ChangeSky.VenusSky` reading Planet3. Corrected from an
+  older note that called Planet1 "the Moon" - Planet1 is **Earth** (City/SpawnLocation/SpaceStation
+  all live there); Planet2 is the Moon.
+- Planets **move** during the story (Mercury drifts toward Venus), so every teleport resolves a live
+  `Centre`/`Center` child - never the table above, and never a cached pivot.
 - The `Planets` folder also held `Planet8`, `Planet9` and `GasGiants` on a later server — the world
   grows with the story phase, and `VenusCity` did not exist at all in the sessions checked.
 - That is why `travel.luau` resolves destinations **lazily** (a function per destination) and reports
@@ -92,6 +98,12 @@ Consequences the code respects:
   Fuel climbs** (`MoonJuiceMars 0 → 349`, `MoonJuiceVenus 0 → ~400` in one cycle); during Fuel=0
   stretches pools sit still or creep (global ~0.2/s, Venus ~1/s after recovery). So a pool stuck
   at 0 is *phase-gated*, not dead — watch Fuel before concluding a planet is unbuyable.
+- **A round restart wipes everything economy-side** (measured on the restart the watcher caught,
+  2026-10-07): every `Values.*` pool → 0, `Fuel` → 0, and all bought buildings gone (SpaceStation,
+  VenusCity, pumps, colonies) — only `City, SpawnLocation, FriendIndustries` stood afterwards.
+  Round length is **not** constant: one round ended at `ClientSeconds=2854`, the next at `3527`.
+- Fuel was seen climbing past the old 100 mark (`110, 130, 150` after that restart) — treat 100 as
+  "Nuke ready", not a hard cap.
 
 ## Weapons (Rail Gun / RocketLauncher)
 
@@ -230,8 +242,9 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
   `Events.Buy("IonMoonJuicePumpJack","Building",850,"Venus")` (button `MercIonMoonPumpJack`), both
   in `VenusController`, both gated on `Values.MoonJuiceVenus >= cost` (staged-buy jobs observed
   `800->9` and `864->26` - PAID). **The ion juice itself does not come from the buildings**: it
-  comes from mining **Planet5** rocks, which drop `Ionized MoonJuice` stacks (`Credits=20`).
-  Planet5 is effectively Venus's rock field (ion-only drops); the Moon (Planet1) drops plain
+  comes from mining **Planet5 = Mercury** rocks, which drop `Ionized MoonJuice` stacks (`Credits=20`).
+  Planet5 is the ion field (ion-only drops, despite the buys being gated on the *Venus* pool -
+  the pump button is even named `MercIonMoonPumpJack`); Earth (Planet1) drops plain
   juice. `VenusCity` itself is a streamed top-level model (`StreamingEnabled=true`) - when it is
   out of range `travel.to("Venus City")` falls back to another hub destination, and the partless
   ion tanks' `GetPivot` returns a meaningless spot (empty void, nothing loads there).
@@ -250,7 +263,7 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
   prompt per stack, sold the anti-matter: **4 stacks = +296 credits (74/stack)** vs 20/stack raw
   ion vs 15/stack plain Moon juice. Economics per swing: Moon plain 15/12 ≈ 1.25, Venus ion
   74/30 ≈ **2.5 → ion mining is ~2× the Moon's income per swing** (ion drops ~1 per 30 swings
-  vs 12). Venus (Planet5) is the better farm target whenever AutoConvert is on.
+  vs 12). Mercury (Planet5) is the better farm target whenever AutoConvert is on.
 - **Yield-aware auto-fix (2026-10-07):** the flat `stallSwings=10` false-fired ~10 times per
   150 swings on Venus's slow ion vein. The chain threshold now scales to
   `max(stallSwings, 1.5 × observed swings-per-juice)` once the run has produced juice, keeping
@@ -269,6 +282,35 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
   buyable exactly once) — the Mars menu also sells `HexSpitter` for 10 and `PurpleSaber` for 20
   from this pool. Farm economics ranking: **Venus ion (2.5/swing, needs AutoConvert) > Moon
   (1.25) > Mars (0.88)**.
+- **Sell-remote semantics (measured 2026-10-07, job "sell-order"):**
+  `Events.SellMoonjuice:FireServer(count, allFlag)`
+  - `(n, true)` = sell everything (this is the game's own "sell everything" button,
+    `MainController` line 157 fires `(#juice, true)` after previewing the total);
+  - `(n, false)` = sell the **first `n` tools in Backpack insertion order - OLDEST first** (the
+    game's own "sell N" dialog previews exactly `first n` credits, `MainController` line 212).
+    Measured: aboard `[MoonJuice, Ionized MoonJuice]`, `(1, false)` sold the **MoonJuice** (+15)
+    and left the ion. `count > available` is rejected outright: `(5, false)` with 1 stack aboard
+    sold **nothing** (+0).
+  - Consequence: a count-sell can only reach anti-matter if the anti tools **lead** the stack;
+    older plain/ion stacks shield everything behind them.
+- **Sell policy (shipped in `farm.luau`, user's rule):**
+  plain/ion juice is never sold while conversion machines are absent - it is *held*;
+  at the convert threshold the farm runs plain→ion→anti through whatever machines exist
+  (`ionizePlain` + `convertIon`, both prompt-gated); anti-matter sells the moment it **leads**
+  the stack (`util.sellableAnti()` = leading run, safe under oldest-first semantics, fired via
+  `(n, false)`); a hold below `config.farm.holdCap` (16) keeps mining and pauses at the cap so
+  the backpack can never clog; and when the round is about to end **everything** is dumped via
+  `sellAll()` regardless of tier. The farm tab shows the tier/machine/round state on the
+  "Sell policy" card.
+- **Round-end dump signals (measured on the 2026-10-07 restart):** the round hard-restarts with
+  no warning UI - `PlayerGui.Fim` ("The End") **never enabled** in the measured round (watcher
+  polled it every 10s through the reset), and the clock length varies (2854 / 3527), so neither
+  can be the primary trigger. What fires reliably before the reset is the final `Events.Text`
+  chain: `HUMANITY IS EXTINCT ... MARS IMPACT` (~50s out) → `THE DYSON SPHERE GOT DESTROYED!`
+  (~20s) → `THE SUN IS MOVING! BUILD MERCURY COLONY ...` (~10s) → reset. `util.roundEndSoon()`
+  listens on `Events.Text` for the last two markers, clears itself when `ClientSeconds` rewinds
+  (that is the new round), and the farm dumps the whole backpack on it. `config.farm.roundLength`
+  stays 0 (clock threshold disabled) until the length proves constant.
 - **MoonJuiceTank pickups** (`Workspace.Unanchored`, attr `MoonJuiceTank=true`, ~35 lying around,
   kids = LocalScript + Beam + Attachment + `Credits` NumberValue): their LocalScript equips a
   Beam to `Workspace.City.Nuke.Frame.Refuel.Attachment` - tanks fuel the Nuke. **They carry NO

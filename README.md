@@ -22,11 +22,10 @@ While the repo is still **private**, HttpGet cannot read it, so use the bundled 
 | `src/config.luau` | Every tunable, in one place. Data only. |
 | `src/state.luau` | The single owner of every value the menu shows |
 | `src/ui.luau` | Defensive wrappers over Rayfield Gen2 elements, bound to state keys (Gen2's `Stat:Set` is numbers-only — word readouts go on `CreateText` cards via `ui.text`) |
-| `src/util.luau` | Character, tool, juice, rock and camera-aim helpers |
+| `src/util.luau` | Character, tool, juice (tier counting, leading-anti subset sell), rock and camera-aim helpers, round-end signal (Text markers + Fim) |
 | `src/perf.luau` | No-render mode (quality, shadows, post effects, FPS cap) |
 | `src/esp.luau` | Highlight-pool ESP (capped per layer) + one optional label |
-| `src/farm.luau` | Auto-farm: stance hold inside the server's mining range, swing, yield-aware auto-fix, collect, ion-first planet rotation, convert ion, sell |
-| `src/combat.luau` | Keep-distance guard + gun mods: rail/rocket refire & volley, HexSpitter (Moon Gun) auto fire-loop with FireRate/accuracy/damage/pellet pins, `MoonAttack` auto-swing while holding a Moon boss/monster role |
+| `src/farm.luau` | Auto-farm: stance hold inside the server's mining range, swing, yield-aware auto-fix, collect, ion-first planet rotation, conversion chain (plain→ion→anti), anti-matter-only sell with hold, round-end dump |
 | `src/travel.luau` | Teleport, noclip, fly |
 | `src/rewards.luau` | Free income: playtime chest listener + daily/weekly quest auto-claim (Knit QuestService) |
 | `scripts/build.mjs` | Packs everything into `dist/paralyz.bundle.luau` |

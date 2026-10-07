@@ -56,7 +56,6 @@ local util = fetchModule("util")({ config = config })
 local perf = fetchModule("perf")({ config = config })
 local esp = fetchModule("esp")({ config = config, state = state, util = util })
 local farm = fetchModule("farm")({ config = config, state = state, util = util })
-local combat = fetchModule("combat")({ config = config, state = state, util = util })
 local travel = fetchModule("travel")({ config = config, state = state, util = util })
 local rewards = fetchModule("rewards")({ config = config, state = state, util = util })
 
@@ -96,7 +95,6 @@ end)
 local farmTab = window:CreateTab({ name = "Farm" })
 local espTab = window:CreateTab({ name = "ESP" })
 local travelTab = window:CreateTab({ name = "Travel" })
-local combatTab = window:CreateTab({ name = "Combat" })
 local settingsTab = window:CreateTab({ name = "Settings" })
 
 -- Farm -------------------------------------------------------------------
@@ -161,6 +159,7 @@ local creditsStat = ui.stat(farmTab, { name = "Credits", value = util.credits() 
 local juiceStat = ui.stat(farmTab, { name = "MoonJuice on hand", value = util.juiceValue() })
 local farmStat = ui.text(farmTab, { name = "Farm", text = "idle" })
 local converterStat = ui.text(farmTab, { name = "Converters built", text = "checking..." })
+local sellStat = ui.text(farmTab, { name = "Sell policy", text = "checking..." })
 
 ui.section(farmTab, "Income")
 
@@ -249,37 +248,10 @@ ui.toggle(travelTab, "Fly", {
 })
 ui.slider(travelTab, "FlySpeed", {
 	name = "Fly speed",
-	description = "Studs per second = value x 60. 8 is ~480/s.",
-	range = { 0.5, 16 },
-	increment = 0.5,
+	description = "Studs per second = value x 60. 8 is ~480/s, 32 is ~1920/s.",
+	range = { 8, 32 },
+	increment = 1,
 	value = config.travel.flySpeed,
-})
-
--- Combat -----------------------------------------------------------------
-ui.section(combatTab, "Keep distance")
-
-ui.toggle(combatTab, "Avoid", {
-	name = "Keep distance",
-	description = "Step away when a monster gets too close.",
-})
-
-ui.section(combatTab, "Gun mods")
-
-ui.toggle(combatTab, "GunRapid", {
-	name = "No cooldown",
-	description = "Rail/Rocket refire as fast as the server answers. Moon Gun (HexSpitter): keeps its own fire loop running, perfect accuracy, damage pinned to max. You aim - the mod never moves your camera.",
-})
-ui.toggle(combatTab, "GunVolley", {
-	name = "Volley",
-	description = "Every rail shot sprays every monster in range; the Moon Gun switches to multi-pellet bursts. Bigger hitbox client-side - what the server kills is its call.",
-})
-
-ui.section(combatTab, "Moon event")
-
-ui.toggle(combatTab, "MoonAttack", {
-	name = "Boss & monster swings",
-	description = "When a Moon event turns you into the Moon boss or a moon monster, swings fire on their own at the game's own cooldown, aimed where your camera looks. Idle until the game assigns you the role.",
-	value = true,
 })
 
 -- Settings ---------------------------------------------------------------
@@ -401,19 +373,6 @@ state.on("Fly", function()
 end)
 state.on("FlySpeed", applyFlySpeed)
 
-state.on("Avoid", function()
-	combat.sync()
-end)
-state.on("GunRapid", function()
-	combat.sync()
-end)
-state.on("GunVolley", function()
-	combat.sync()
-end)
-state.on("MoonAttack", function()
-	combat.sync()
-end)
-
 state.on("AutoRewards", function()
 	rewards.sync()
 end)
@@ -449,7 +408,6 @@ end)
 farm.sync()
 esp.sync()
 travel.sync()
-combat.sync()
 rewards.sync()
 rewards.start()
 if state.get("NoRender") == nil then
@@ -500,6 +458,50 @@ task.spawn(function()
 				converterStat:Set(#list > 0 and table.concat(list, ", ") or "none built")
 			end)
 		end
+		if sellStat then
+			update("sell", function()
+				-- Tier breakdown + which machines can eat it + where the
+				-- round clock stands. Plain/ion are held by policy; only the
+				-- leading anti run sells (oldest-first server semantics).
+				local plain = util.plainJuiceCount()
+				local ion = util.ionJuiceCount()
+				local anti = util.antiJuiceCount()
+				local tiers = {}
+				if plain > 0 then
+					table.insert(tiers, plain .. " plain")
+				end
+				if ion > 0 then
+					table.insert(tiers, ion .. " ion")
+				end
+				if anti > 0 then
+					table.insert(tiers, anti .. " anti")
+				end
+				local held = #tiers > 0 and table.concat(tiers, ", ") or "empty"
+				local machines = {}
+				if util.ionizerPrompt() then
+					table.insert(machines, "ionizer")
+				end
+				if util.converterPrompt() then
+					table.insert(machines, "converter")
+				end
+				local mach = #machines > 0 and table.concat(machines, "+") or "none"
+				local cs = util.storyClock()
+				local clock = string.format(
+					"%d:%02d",
+					math.floor(cs / 60),
+					math.floor(cs % 60)
+				)
+				sellStat:Set(
+					string.format(
+						"%s | machines: %s | round %s%s",
+						held,
+						mach,
+						clock,
+						util.roundEndSoon() and " - DUMPING" or ""
+					)
+				)
+			end)
+		end
 		if questStat then
 			update("quests", function()
 				questStat:Set(rewards.stats())
@@ -548,11 +550,11 @@ end)
 ------------------------------------------------------------------ shutdown
 shutdown = function()
 	farm.stop()
-	combat.stop()
 	esp.stop()
 	travel.stop()
 	rewards.stop()
 	util.stopAim()
+	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
 		pcall(function()
 			blackGui:Destroy()
@@ -580,7 +582,6 @@ if getgenv then
 		perf = perf,
 		esp = esp,
 		farm = farm,
-		combat = combat,
 		travel = travel,
 		rewards = rewards,
 	}

@@ -219,6 +219,186 @@ return function(deps)
 		return n
 	end
 
+	-- The three juice tiers, split by name: plain MoonJuice (15/stack),
+	-- "Ionized MoonJuice" (20), "Anti Matter MoonJuice" (74).
+	function util.isIon(tool: Instance): boolean
+		return string.find(string.lower(tool.Name), "ion", 1, true) ~= nil
+	end
+
+	function util.isAnti(tool: Instance): boolean
+		return string.find(string.lower(tool.Name), "anti", 1, true) ~= nil
+	end
+
+	function util.plainJuiceCount(): number
+		local n = 0
+		for _, entry in ipairs(util.juiceTools()) do
+			if not util.isIon(entry.tool) and not util.isAnti(entry.tool) then
+				n += 1
+			end
+		end
+		return n
+	end
+
+	function util.antiJuiceCount(): number
+		local n = 0
+		for _, entry in ipairs(util.juiceTools()) do
+			if util.isAnti(entry.tool) then
+				n += 1
+			end
+		end
+		return n
+	end
+
+	-- How many anti-matter stacks can be sold RIGHT NOW without touching a
+	-- non-anti stack. MEASURED (2026-10-07, job "sell-order"): the server
+	-- sells the OLDEST tools first, in Backpack insertion order - firing
+	-- (1,false) with [MoonJuice, Ionized] aboard removed the MoonJuice, and
+	-- the game's own sell preview sums `first N` the same way. So the safe
+	-- subset = the leading run of anti-matter tools; anything behind an
+	-- older plain/ion stack stays held until it converts (or the round
+	-- end dump fires).
+	function util.sellableAnti(): number
+		local list = util.juiceTools()
+		local n = 0
+		for i = 1, #list do
+			if util.isAnti(list[i].tool) then
+				n += 1
+			else
+				break
+			end
+		end
+		return n
+	end
+
+	-- Sells ONLY the leading anti-matter run (the game's own "sell N"
+	-- contract: (count, false)). Returns the stacks sold.
+	function util.sellAnti(): number
+		local n = util.sellableAnti()
+		if n == 0 then
+			return 0
+		end
+		local events = ReplicatedStorage:FindFirstChild("Events")
+		local remote = events and events:FindFirstChild("SellMoonjuice")
+		if remote then
+			(remote :: RemoteEvent):FireServer(n, false)
+		end
+		return n
+	end
+
+	-- Is any sell/convert action actually pending right now? Used to decide
+	-- whether a swing batch must yield; a plain hold below the cap keeps
+	-- mining (stacking for the round-end dump) instead of spinning. The
+	-- conversion check mirrors the loop's threshold: below sellAt the
+	-- machines are deliberately NOT used yet, so they are not "pending".
+	function util.sellActionPending(): boolean
+		if util.juiceCount() == 0 then
+			return false
+		end
+		if util.roundEndSoon() then
+			return true
+		end
+		if util.sellableAnti() > 0 then
+			return true
+		end
+		if util.juiceCount() >= config.farm.sellAt then
+			if util.ionJuiceCount() > 0 and util.converterPrompt() then
+				return true
+			end
+			if util.plainJuiceCount() > 0 and util.ionizerPrompt() then
+				return true
+			end
+		end
+		return false
+	end
+
+	---------------------------------------------------------------- round end
+	-- Values.ClientSeconds is the story clock; it resets when the round
+	-- restarts (measured: 3527 -> 5 after the final story chain).
+	function util.storyClock(): number
+		local values = ReplicatedStorage:FindFirstChild("Values")
+		local cs = values and values:FindFirstChild("ClientSeconds")
+		return cs and (cs :: NumberValue).Value or 0
+	end
+
+	-- End-of-round signals, MEASURED on the restart the round-end watcher
+	-- caught (round ended at ClientSeconds=3527):
+	--   * The final story chain arrives over the Text remote shortly before
+	--     the hard reset: "THE DYSON SPHERE GOT DESTROYED!" (~20s to go)
+	--     and "THE SUN IS MOVING! ..." (~10s). Both are inside the user's
+	--     ~30s dump window.
+	--   * PlayerGui.Fim ("The End") as generic backup - it NEVER enabled in
+	--     the measured round, so it cannot be the only signal.
+	--   * config.farm.roundLength clock threshold, disabled (0) until the
+	--     watcher proves the length constant - measured rounds ended at
+	--     2854 and 3527, so it is NOT constant.
+	-- The flag clears itself when the clock rewinds: that is a new round.
+	local END_MARKERS = {
+		"dyson sphere got destroyed",
+		"the sun is moving",
+	}
+	local endMarker = false
+	local endClock = 0
+	local endWatch: RBXScriptConnection? = nil
+
+	local function hookEndWatch()
+		if endWatch then
+			return
+		end
+		local events = ReplicatedStorage:FindFirstChild("Events")
+		local remote = events and events:FindFirstChild("Text")
+		if remote then
+			endWatch = (remote :: RemoteEvent).OnClientEvent:Connect(function(msg)
+				if typeof(msg) ~= "string" then
+					return
+				end
+				local low = string.lower(msg)
+				for _, marker in ipairs(END_MARKERS) do
+					if string.find(low, marker, 1, true) then
+						endMarker = true
+						return
+					end
+				end
+			end)
+		end
+	end
+	hookEndWatch()
+
+	-- Called on shutdown/reload so the old bundle's listener cannot keep
+	-- setting the flag after a live-reload.
+	function util.stop()
+		if endWatch then
+			endWatch:Disconnect()
+			endWatch = nil
+		end
+	end
+
+	-- The round is about to restart: everything in the backpack is lost, so
+	-- the farm dumps the whole stack regardless of tier.
+	function util.roundEndSoon(): boolean
+		local cs = util.storyClock()
+		if cs < endClock then
+			-- clock rewind = a fresh round; the old round's warning expires
+			endMarker = false
+		end
+		endClock = cs
+		if endMarker then
+			return true
+		end
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		local fim = pg and pg:FindFirstChild("Fim")
+		if fim and (fim :: ScreenGui).Enabled then
+			return true
+		end
+		local len = config.farm.roundLength
+		if len and len > 0 then
+			local win = config.farm.endDumpWindow or 30
+			if cs >= len - win then
+				return true
+			end
+		end
+		return false
+	end
+
 	-- The only conversion interface in the game: the SpaceStation's
 	-- "Insert Moonjuice" prompt (2.0s hold, 10 studs, line of sight).
 	-- Buildings phase in and out, so this resolves freshly every call.
@@ -234,6 +414,37 @@ return function(deps)
 			local prompt = well and well:FindFirstChildWhichIsA("ProximityPrompt", true)
 			if prompt then
 				return prompt
+			end
+		end
+		return nil
+	end
+
+	-- The ionizer (plain -> ion) is the first link of the chain and it is
+	-- phase/buy gated: a planet only gets one once its colony is built, so
+	-- the exact hierarchy was not stable enough to hardcode yet. Resolve
+	-- freshly with a short cache: any prompt whose own text or machine name
+	-- talks about ionizing (the converter is excluded by identity so its
+	-- "Insert Moonjuice" can never be mistaken for it). Measured cost: a
+	-- full workspace descendant scan, hence the 2s TTL.
+	local ionizerCache: ProximityPrompt? = nil
+	local ionizerAt = 0
+	function util.ionizerPrompt(): ProximityPrompt?
+		if os.clock() - ionizerAt < 2 then
+			return ionizerCache
+		end
+		ionizerAt = os.clock()
+		ionizerCache = nil
+		local conv = util.converterPrompt()
+		for _, d in ipairs(workspace:GetDescendants()) do
+			if d:IsA("ProximityPrompt") and d ~= conv then
+				local holder = d.Parent
+				local hay = string.lower(
+					d.ActionText .. " " .. d.ObjectText .. " " .. (holder and holder.Name or "")
+				)
+				if string.find(hay, "ioniz", 1, true) or string.find(hay, "ionmoon", 1, true) then
+					ionizerCache = d
+					return ionizerCache
+				end
 			end
 		end
 		return nil

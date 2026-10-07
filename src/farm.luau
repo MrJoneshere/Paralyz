@@ -431,6 +431,54 @@ return function(deps)
 		return converted
 	end
 
+	-- Plain juice is only worth mining while an ionizer can walk it to ion
+	-- (15 -> 20) and the converter finishes the trip to 74. Same hold
+	-- protocol as convertIon: one verified hold per stack, and a hold that
+	-- consumes nothing aborts the pass instead of looping on a machine
+	-- that is only pretending. The ionizer is phase/buy gated (a planet
+	-- gets one when its colony is built), so the prompt resolves fresh on
+	-- every call.
+	local function ionizePlain(): number
+		local prompt = util.ionizerPrompt()
+		if not prompt then
+			return 0
+		end
+		local holder = prompt.Parent
+		local well = if holder and (holder :: Instance):IsA("BasePart")
+			then (holder :: BasePart)
+			else if holder then (holder :: any):FindFirstChildWhichIsA("BasePart", true) else nil
+		if not well then
+			return 0
+		end
+		setPhase("ionizing plain juice")
+		rotateTeleport(CFrame.new(well.Position + Vector3.new(0, 3, 0)))
+		task.wait(0.6)
+		local ionized = 0
+		for _ = 1, math.min(util.plainJuiceCount(), 20) do
+			local before = util.plainJuiceCount()
+			if before <= 0 then
+				break
+			end
+			pcall(function()
+				prompt:InputHoldBegin()
+				task.wait((prompt :: ProximityPrompt).HoldDuration + 0.6)
+				prompt:InputHoldEnd()
+			end)
+			task.wait(0.8)
+			local after = util.plainJuiceCount()
+			if after < before then
+				ionized += before - after
+			else
+				report("ionizer rejected the hold - moving on", true)
+				break
+			end
+		end
+		if ionized > 0 then
+			report(string.format("ionized %d plain stacks", ionized), true)
+		end
+		return ionized
+	end
+
 	------------------------------------------------------------------- loop
 	local function runLoop(opts)
 		local maxCycles = opts and opts.maxCycles
@@ -484,21 +532,65 @@ return function(deps)
 
 			noteJuice()
 
-			-- Sell before the stack fills so the backpack never clogs.
-			if util.juiceCount() >= config.farm.sellAt then
-				-- Convert first when ion stacks are aboard: the machine
-				-- pays more than selling the ion straight.
-				if state.enabled("AutoConvert") and util.ionJuiceCount() > 0 then
-					convertIon()
-				end
+			-- Sell policy (user's rule): never sell plain/ion juice - it is
+			-- held for the conversion machines. Antimatter sells whenever it
+			-- leads the stack (the server sells oldest-first - measured in
+			-- job "sell-order" - so only the leading run can be sold without
+			-- touching a held stack). If the round is about to restart,
+			-- everything is dumped before the reset takes it.
+			local juiceNow = util.juiceCount()
+			if juiceNow > 0 and util.roundEndSoon() then
 				local count = util.sellAll()
 				if count > 0 then
 					sold += count
-					report(string.format("sold %d stacks (total %d)", count, sold))
+					report(string.format("round ending - dumped %d stacks (total %d)", count, sold), true)
 				end
 				lastJuice = util.juiceCount()
 				task.wait(0.4)
 				continue
+			end
+
+			local lead = util.sellableAnti()
+			if lead > 0 then
+				local count = util.sellAnti()
+				if count > 0 then
+					sold += count
+					report(string.format("sold %d anti-matter (total %d)", count, sold))
+				end
+				lastJuice = util.juiceCount()
+				task.wait(0.3)
+				continue
+			end
+
+			-- Convert threshold: walk the held stack through both machines
+			-- (plain -> ion -> anti), then the anti leads and step 2 sells it.
+			if juiceNow >= config.farm.sellAt then
+				local converted = 0
+				if state.enabled("AutoConvert") then
+					if util.plainJuiceCount() > 0 and util.ionizerPrompt() then
+						converted += ionizePlain()
+					end
+					-- Prompt gate: without it convertIon would re-announce
+					-- "no converter machine" on every hold pass below the
+					-- cap (the old code only ever ran once per threshold
+					-- because it sold straight after).
+					if util.ionJuiceCount() > 0 and util.converterPrompt() then
+						converted += convertIon()
+					end
+				end
+				if converted > 0 then
+					lastJuice = util.juiceCount()
+					task.wait(0.4)
+					continue
+				end
+				-- Nothing is convertible: keep stacking below the cap (it
+				-- all dumps at round end anyway) and pause mining at the cap
+				-- so the backpack can never clog.
+				if juiceNow >= config.farm.holdCap then
+					setPhase(string.format("holding %d stacks - no conversion machine available", juiceNow))
+					task.wait(1.5)
+					continue
+				end
 			end
 
 			local root = util.root()
@@ -634,7 +726,14 @@ return function(deps)
 				if maxJuice and gained >= maxJuice then
 					break
 				end
-				if util.juiceCount() >= config.farm.sellAt then
+				-- Yield to the loop only when something must happen: the
+				-- hold cap, or a pending dump/sell/convert. A hold below
+				-- the cap keeps swinging - that juice is value waiting for
+				-- the machines and the round-end dump.
+				if util.juiceCount() >= config.farm.holdCap then
+					break
+				end
+				if util.sellActionPending() then
 					break
 				end
 

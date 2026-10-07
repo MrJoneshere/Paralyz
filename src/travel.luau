@@ -291,14 +291,26 @@ return function(deps)
 				flyConn:Disconnect()
 				flyConn = nil
 			end
+			local char = util.character()
+			local root = util.root()
+			local hum = util.humanoid()
+			-- The fly loop parks the humanoid in Physics every frame; without
+			-- an explicit recovery the character stays frozen and cannot walk
+			-- again after the toggle goes off.
+			if root then
+				root.AssemblyLinearVelocity = Vector3.zero
+			end
+			if hum then
+				hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+				if hum:GetState() == Enum.HumanoidStateType.Physics then
+					hum:ChangeState(Enum.HumanoidStateType.Running)
+				end
+			end
 			-- Give collisions back unless the Noclip toggle wants them off.
-			if not state.enabled("Noclip") then
-				local char = util.character()
-				if char then
-					for _, part in ipairs(char:GetDescendants()) do
-						if part:IsA("BasePart") then
-							part.CanCollide = true
-						end
+			if not state.enabled("Noclip") and char then
+				for _, part in ipairs(char:GetDescendants()) do
+					if part:IsA("BasePart") then
+						part.CanCollide = true
 					end
 				end
 			end

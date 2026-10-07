@@ -12,402 +12,6 @@ local BASE = "https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/src/"
 
 -- The bundler replaces this line with a literal table of module sources.
 local PARALYZ_MODULES = {
-	["combat"] = [==[
---!strict
--- Paralyz / src/combat.luau
--- Keep-distance guard and gun MODS.
---
--- Scope decided with the user: no auto-swing / auto-shoot helpers (they
--- were weak and camera-locking) and no damage guard - damage in this game
--- is applied server-side, so a client cannot cancel it. What a client CAN
--- change is how its own guns are FIRED: rate, client gates, and how many
--- targets one trigger touches. That is what these mods do. The user aims;
--- the mods remove the limits.
---
--- What the guns actually are (read from the tools themselves):
---   Rail Gun        LocalScript fires tool.Click:FireServer(mouse.Hit.p) on
---                   Button1Down; the 5s wait in that script is only the
---                   cursor icon, and the remote takes an explicit position.
---   RocketLauncher  the client side is just MouseLoc.OnClientInvoke
---                   returning Mouse.Hit.p - the server pulls the aim when
---                   it fires - plus Tool.Enabled mirroring a server gate.
---   HexSpitter      "Moon Gun" (Events.Buy, 10 juice). Its LocalScript owns
---                   a while-MouseDown fire loop whose upvalues are env
---                   globals (getsenv): StartFiring / StopFiring /
---                   MouseDown. The loop reads Configuration client-side
---                   (FireRate, Accuracy, Burst.Bullets, Damage), so pinning
---                   those and keeping the loop alive is a real mod.
---
--- Honest damage verdict (measured 2026-10-07, see NOTES.md): NO player
--- weapon awards damage on moon monsters for a normal account - rail all
--- variants, HexSpitter loop fire with verified on-target aim, sword at
--- contact range, synthetic RayHit payloads: all zero. These mods are
--- exactly what a client can own: rate, gates, pellets, volley spread.
--- Damage that lands is the server's call (ships/other content may honor
--- it; monsters so far do not).
-
-return function(deps)
-	local config = deps.config
-	local state = deps.state
-	local util = deps.util
-
-	local combat = {}
-
-	------------------------------------------------------------------- avoid
-	local avoidConn: RBXScriptConnection? = nil
-
-	local function setAvoid(on: boolean)
-		if on then
-			if avoidConn then
-				return
-			end
-			avoidConn = util.RunService.Heartbeat:Connect(function()
-				local root = util.root()
-				if not root then
-					return
-				end
-				local monster = util.nearestMonster(root.Position, config.combat.avoidRadius)
-				if monster then
-					-- Push away from the threat: fast, server-agnostic, works
-					-- mid-air because the game lets you walk on moons anyway.
-					local away = (root.Position - monster:GetPivot().Position)
-					if away.Magnitude < 1 then
-						away = Vector3.new(0, 1, 0)
-					end
-					root.CFrame = root.CFrame + away.Unit * 6
-				end
-			end)
-		else
-			if avoidConn then
-				avoidConn:Disconnect()
-				avoidConn = nil
-			end
-		end
-	end
-
-	---------------------------------------------------------------- gun mods
-	-- GunRapid: refire the equipped gun every config.combat.gunDelay,
-	-- clearing the rocket's client-side Enabled gate first. No camera
-	-- movement anywhere - the mod fires where the user is already looking.
-	-- GunVolley: every rail trigger additionally sends a shot at every
-	-- monster in gunRange. Server damage math is not client-writable, so
-	-- this is the honest "bigger hitbox": one trigger, the whole crowd.
-	-- HexSpitter: GunRapid pins the values its own loop reads (FireRate,
-	-- Accuracy, best-effort Damage) and keeps the while-MouseDown loop
-	-- alive through getsenv; GunVolley raises Burst.Bullets for multi-
-	-- pellet triggers. The loop is started/stopped only by us when we
-	-- started it, so a manual hold is never released underneath the user.
-	local modRunning = false
-	local nextFire = 0
-	local nextPin = 0
-	local hexStartedEnv: { [string]: any }? = nil
-
-	local function gunKind(tool: Tool?): string?
-		if not tool then
-			return nil
-		end
-		local low = string.lower(tool.Name)
-		if string.find(low, "rail", 1, true) then
-			return "rail"
-		end
-		if string.find(low, "rocket", 1, true) then
-			return "rocket"
-		end
-		if string.find(low, "spitter", 1, true) or string.find(low, "hex", 1, true) then
-			return "hex"
-		end
-		return nil
-	end
-
-	-- The HexSpitter LocalScript keeps its loop control as env globals
-	-- (old-style script declarations): StartFiring, StopFiring, MouseDown,
-	-- ToolEquipped, Reloading. getsenv reaches them; nothing here needs
-	-- focus or any input synthesis (VIM input is flagged gameProcessed and
-	-- the tool's handler skips it - measured).
-	local function hexEnv(tool: Tool): { [string]: any }?
-		local ls = (tool :: Tool):FindFirstChild("LocalScript")
-		if not ls then
-			return nil
-		end
-		local ok, env = pcall(getsenv, ls :: Instance)
-		if ok and type(env) == "table" and type((env :: any).StartFiring) == "function" then
-			return env :: any
-		end
-		return nil
-	end
-
-	local function hexPins(tool: Tool, rapid: boolean, volley: boolean)
-		local cfg = (tool :: Tool):FindFirstChild("Configuration")
-		if not cfg then
-			return
-		end
-		pcall(function()
-			local fr = cfg:FindFirstChild("FireRate")
-			if fr and (fr :: any).Value > config.combat.hexFireRate then
-				(fr :: any).Value = config.combat.hexFireRate
-			end
-			if rapid then
-				local acc = cfg:FindFirstChild("Accuracy")
-				if acc then
-					(acc :: any).Value = Vector3.zero
-				end
-			end
-			if volley then
-				local burst = cfg:FindFirstChild("Burst")
-				local bullets = burst and burst:FindFirstChild("Bullets")
-				if bullets and (bullets :: any).MaxValue < config.combat.hexPellets then
-					(bullets :: any).MaxValue = config.combat.hexPellets
-				end
-			end
-			-- Best-effort: the value is a DoubleConstrainedValue (max 17).
-			-- Server may re-replicate the stock 15 over it; harmless either way.
-			local dmg = cfg:FindFirstChild("Damage")
-			if dmg and (dmg :: any).Value < (dmg :: any).MaxValue then
-				(dmg :: any).Value = (dmg :: any).MaxValue
-			end
-		end)
-	end
-
-	local function modLoop()
-		while modRunning do
-			local rapid = state.enabled("GunRapid")
-			local volley = state.enabled("GunVolley")
-			if not rapid and not volley then
-				if hexStartedEnv then
-					pcall(function()
-						(hexStartedEnv :: any).MouseDown = false
-					end)
-					hexStartedEnv = nil
-				end
-				task.wait(0.25)
-				continue
-			end
-			if not util.alive() then
-				task.wait(0.5)
-				continue
-			end
-
-			local tool = util.equippedTool()
-			local kind = gunKind(tool)
-			-- This game re-parents the pickaxe into the character alongside
-			-- other tools, so "first tool child" misses the hex. The hex's
-			-- own env flag (ToolEquipped, set by its Equipped/Unequipped
-			-- handlers) is the ground truth for whether it is active - use
-			-- it when the naive lookup does not find a gun.
-			if not kind then
-				local hexTool = util.character():FindFirstChild("HexSpitter")
-				if hexTool then
-					local env = hexEnv(hexTool :: Tool)
-					if env and env.ToolEquipped == true then
-						tool, kind = hexTool :: Tool, "hex"
-					end
-				end
-			end
-			if not kind or not tool then
-				task.wait(0.3)
-				continue
-			end
-
-			if kind == "hex" then
-				-- Re-pin the values the fire loop reads about once a second
-				-- (server replication can roll them back).
-				if os.clock() >= nextPin then
-					nextPin = os.clock() + 1
-					hexPins(tool :: Tool, rapid, volley)
-				end
-				local env = hexEnv(tool :: Tool)
-				if env then
-					local active = env.MouseDown == true and (tool :: Tool).Enabled == false
-					-- ToolEquipped is the fire loop's own gate: without it,
-					-- spawning would churn (the loop would exit instantly).
-					if rapid and not active and env.ToolEquipped == true then
-						env.MouseDown = true
-						task.spawn(env.StartFiring)
-						hexStartedEnv = env
-					elseif not rapid and hexStartedEnv == env and env.MouseDown then
-						-- Only release the loop we started; a manual hold
-						-- (input-driven MouseDown) is left alone.
-						env.MouseDown = false
-						hexStartedEnv = nil
-					end
-				end
-				task.wait(0.2)
-				continue
-			end
-
-			local now = os.clock()
-			if now < nextFire then
-				task.wait(0.05)
-				continue
-			end
-
-			if kind == "rail" then
-				local click = (tool :: Tool):FindFirstChild("Click")
-				if click and click:IsA("RemoteEvent") then
-					local mouse = game:GetService("Players").LocalPlayer:GetMouse()
-					click:FireServer(mouse.Hit.Position)
-					if volley then
-						local root = util.root()
-						if root then
-							for _, monster in ipairs(util.aliveMonsters()) do
-								local pivot = monster:GetPivot().Position
-								if util.dist(root.Position, pivot) <= config.combat.gunRange then
-									click:FireServer(pivot)
-								end
-							end
-						end
-					end
-					nextFire = now + config.combat.gunDelay
-				end
-			else
-				-- Client gate only; the server owns the real cooldown.
-				(tool :: Tool).Enabled = true
-				pcall(function()
-					(tool :: Tool):Activate()
-				end)
-				nextFire = now + config.combat.gunDelay
-			end
-			task.wait(0.05)
-		end
-	end
-
-	function combat.startGuns()
-		if modRunning then
-			return false
-		end
-		modRunning = true
-		nextFire = 0
-		task.spawn(modLoop)
-		return true
-	end
-
-	function combat.stopGuns()
-		modRunning = false
-		if hexStartedEnv then
-			pcall(function()
-				(hexStartedEnv :: any).MouseDown = false
-			end)
-			hexStartedEnv = nil
-		end
-	end
-
-	----------------------------------------------------- moon event roles
-	-- When a Moon event assigns a player the boss or the monster role, the
-	-- server marks the character (MoonBossPlayer / MoonMonsterPlayer) and
-	-- the game's own MoonBoss/MoonMonsterPlayerControls turn clicks into
-	-- `Events.<Role>.Attack` with the camera look vector, a per-role client
-	-- cooldown (0.35s boss / 0.65s monster) and a pulse attribute the
-	-- client animator watches to play the swing. We replay exactly that
-	-- protocol: same remote, same payload, same cooldown, same pulse.
-	-- Background-safe by construction - no input synthesis, no camera
-	-- movement; it fires where the camera already looks.
-	local moonRunning = false
-
-	local MOON_ROLES = {
-		{
-			attr = "MoonBossPlayer",
-			remote = "MoonBoss",
-			pulse = "MoonBossAttackPulse",
-			delay = config.combat.moonBossDelay,
-		},
-		{
-			-- The vanilla monster control backs off while the boss role is
-			-- held; mirror that precedence exactly.
-			attr = "MoonMonsterPlayer",
-			remote = "MoonMonster",
-			pulse = "MoonMonsterAttackPulse",
-			delay = config.combat.moonMonsterDelay,
-			requiresNot = "MoonBossPlayer",
-		},
-	}
-
-	local function moonLoop()
-		local nextFire = 0
-		while moonRunning do
-			pcall(function()
-				local character = util.character()
-				if not character then
-					return
-				end
-				local now = os.clock()
-				if now < nextFire then
-					return
-				end
-				for _, role in ipairs(MOON_ROLES) do
-					if character:GetAttribute(role.attr) == true
-						and (role.requiresNot == nil or character:GetAttribute(role.requiresNot) ~= true)
-					then
-						-- If the vanilla controls just swung (the pulse
-						-- attribute shares our os.clock domain), defer to
-						-- them: manual play keeps exactly the vanilla rate
-						-- instead of getting doubled by us.
-						local pulse = character:GetAttribute(role.pulse)
-						if typeof(pulse) == "number" and now - pulse < role.delay then
-							nextFire = math.max(nextFire, pulse + role.delay)
-							return
-						end
-						local events = util.ReplicatedStorage:FindFirstChild("Events")
-						local folder = events and events:FindFirstChild(role.remote)
-						local attack = folder and folder:FindFirstChild("Attack")
-						if not attack then
-							return
-						end
-						local cam = workspace.CurrentCamera
-						local root = util.root()
-						local dir = if cam
-							then cam.CFrame.LookVector
-							else if root then root.CFrame.LookVector else nil
-						if not dir then
-							return
-						end
-						character:SetAttribute(role.pulse, now)
-						local attackRemote = attack :: RemoteEvent
-						attackRemote:FireServer(dir)
-						nextFire = now + role.delay
-						return
-					end
-				end
-			end)
-			task.wait(0.1)
-		end
-	end
-
-	function combat.startMoon()
-		if moonRunning then
-			return false
-		end
-		moonRunning = true
-		task.spawn(moonLoop)
-		return true
-	end
-
-	function combat.stopMoon()
-		moonRunning = false
-	end
-
-	function combat.sync()
-		setAvoid(state.enabled("Avoid"))
-		if state.enabled("MoonAttack") then
-			combat.startMoon()
-		else
-			combat.stopMoon()
-		end
-		if state.enabled("GunRapid") or state.enabled("GunVolley") then
-			combat.startGuns()
-		else
-			combat.stopGuns()
-		end
-	end
-
-	function combat.stop()
-		combat.stopGuns()
-		combat.stopMoon()
-		setAvoid(false)
-	end
-
-	return combat
-end
-]==],
 	["config"] = [==[
 --!strict
 -- Paralyz / src/config.luau
@@ -423,8 +27,23 @@ return {
 		swingDelay = 0.35,
 		-- Camera stand-off distance from the rock while aiming.
 		aimDistance = 35,
-		-- Sell once this many MoonJuice stacks are sitting in the Backpack.
+		-- Convert threshold: once this many stacks are aboard, the farm
+		-- walks them through the ionizer/converter chain. Antimatter is
+		-- sold whenever it leads the stack (see util.sellableAnti), so
+		-- this no longer gates the sell itself.
 		sellAt = 10,
+		-- Hold ceiling: with no conversion machines available the farm
+		-- keeps stacking plain/ion juice (it is all dumped at round end),
+		-- but pauses mining at this many stacks so the backpack can never
+		-- clog and dead swings cannot pile up.
+		holdCap = 16,
+		-- Round length in story seconds (Values.ClientSeconds), measured
+		-- from the round-end watcher. 0 = still unknown, which disables
+		-- the clock-based dump; the Fim "The End" screen always dumps.
+		roundLength = 0,
+		-- Dump everything when the clock is within this many seconds of
+		-- roundLength (the user's ~30s rule).
+		endDumpWindow = 30,
 		-- Rocks stream by proximity and in waves: when the folders are empty,
 		-- wait this long and look again.
 		noRockDelay = 4,
@@ -500,29 +119,6 @@ return {
 			juice = Color3.fromRGB(255, 214, 96),
 			rock = Color3.fromRGB(210, 210, 210),
 		},
-	},
-
-	combat = {
-		-- Keep-distance when Avoid is on: monsters inside this radius trigger a step back.
-		avoidRadius = 14,
-		-- Gun mods: refire cadence while a mod is armed, and the range the
-		-- volley sprays monsters at. Client-side only - server rate limits
-		-- and damage math are not writable from here.
-		gunDelay = 0.4,
-		gunRange = 800,
-		-- HexSpitter ("Moon Gun"): its LocalScript fire loop reads these
-		-- Configuration values client-side, so pinning them has real effect.
-		-- FireRate = seconds between bursts (stock 0.06); the loop is bound
-		-- by remote round-trips anyway, so this is a feel knob, not a kick
-		-- risk. hexPellets raises Burst.Bullets.MaxValue: more pellets per
-		-- trigger at a slower cycle (true volley semantics).
-		hexFireRate = 0.02,
-		hexPellets = 8,
-		-- Moon boss / moon monster role swings: mirror the client cooldowns
-		-- inside the game's own MoonBoss/MoonMonsterPlayerControls so our
-		-- remote cadence is indistinguishable from a clicking player.
-		moonBossDelay = 0.35,
-		moonMonsterDelay = 0.65,
 	},
 
 	travel = {
@@ -1375,6 +971,54 @@ return function(deps)
 		return converted
 	end
 
+	-- Plain juice is only worth mining while an ionizer can walk it to ion
+	-- (15 -> 20) and the converter finishes the trip to 74. Same hold
+	-- protocol as convertIon: one verified hold per stack, and a hold that
+	-- consumes nothing aborts the pass instead of looping on a machine
+	-- that is only pretending. The ionizer is phase/buy gated (a planet
+	-- gets one when its colony is built), so the prompt resolves fresh on
+	-- every call.
+	local function ionizePlain(): number
+		local prompt = util.ionizerPrompt()
+		if not prompt then
+			return 0
+		end
+		local holder = prompt.Parent
+		local well = if holder and (holder :: Instance):IsA("BasePart")
+			then (holder :: BasePart)
+			else if holder then (holder :: any):FindFirstChildWhichIsA("BasePart", true) else nil
+		if not well then
+			return 0
+		end
+		setPhase("ionizing plain juice")
+		rotateTeleport(CFrame.new(well.Position + Vector3.new(0, 3, 0)))
+		task.wait(0.6)
+		local ionized = 0
+		for _ = 1, math.min(util.plainJuiceCount(), 20) do
+			local before = util.plainJuiceCount()
+			if before <= 0 then
+				break
+			end
+			pcall(function()
+				prompt:InputHoldBegin()
+				task.wait((prompt :: ProximityPrompt).HoldDuration + 0.6)
+				prompt:InputHoldEnd()
+			end)
+			task.wait(0.8)
+			local after = util.plainJuiceCount()
+			if after < before then
+				ionized += before - after
+			else
+				report("ionizer rejected the hold - moving on", true)
+				break
+			end
+		end
+		if ionized > 0 then
+			report(string.format("ionized %d plain stacks", ionized), true)
+		end
+		return ionized
+	end
+
 	------------------------------------------------------------------- loop
 	local function runLoop(opts)
 		local maxCycles = opts and opts.maxCycles
@@ -1428,21 +1072,65 @@ return function(deps)
 
 			noteJuice()
 
-			-- Sell before the stack fills so the backpack never clogs.
-			if util.juiceCount() >= config.farm.sellAt then
-				-- Convert first when ion stacks are aboard: the machine
-				-- pays more than selling the ion straight.
-				if state.enabled("AutoConvert") and util.ionJuiceCount() > 0 then
-					convertIon()
-				end
+			-- Sell policy (user's rule): never sell plain/ion juice - it is
+			-- held for the conversion machines. Antimatter sells whenever it
+			-- leads the stack (the server sells oldest-first - measured in
+			-- job "sell-order" - so only the leading run can be sold without
+			-- touching a held stack). If the round is about to restart,
+			-- everything is dumped before the reset takes it.
+			local juiceNow = util.juiceCount()
+			if juiceNow > 0 and util.roundEndSoon() then
 				local count = util.sellAll()
 				if count > 0 then
 					sold += count
-					report(string.format("sold %d stacks (total %d)", count, sold))
+					report(string.format("round ending - dumped %d stacks (total %d)", count, sold), true)
 				end
 				lastJuice = util.juiceCount()
 				task.wait(0.4)
 				continue
+			end
+
+			local lead = util.sellableAnti()
+			if lead > 0 then
+				local count = util.sellAnti()
+				if count > 0 then
+					sold += count
+					report(string.format("sold %d anti-matter (total %d)", count, sold))
+				end
+				lastJuice = util.juiceCount()
+				task.wait(0.3)
+				continue
+			end
+
+			-- Convert threshold: walk the held stack through both machines
+			-- (plain -> ion -> anti), then the anti leads and step 2 sells it.
+			if juiceNow >= config.farm.sellAt then
+				local converted = 0
+				if state.enabled("AutoConvert") then
+					if util.plainJuiceCount() > 0 and util.ionizerPrompt() then
+						converted += ionizePlain()
+					end
+					-- Prompt gate: without it convertIon would re-announce
+					-- "no converter machine" on every hold pass below the
+					-- cap (the old code only ever ran once per threshold
+					-- because it sold straight after).
+					if util.ionJuiceCount() > 0 and util.converterPrompt() then
+						converted += convertIon()
+					end
+				end
+				if converted > 0 then
+					lastJuice = util.juiceCount()
+					task.wait(0.4)
+					continue
+				end
+				-- Nothing is convertible: keep stacking below the cap (it
+				-- all dumps at round end anyway) and pause mining at the cap
+				-- so the backpack can never clog.
+				if juiceNow >= config.farm.holdCap then
+					setPhase(string.format("holding %d stacks - no conversion machine available", juiceNow))
+					task.wait(1.5)
+					continue
+				end
 			end
 
 			local root = util.root()
@@ -1578,7 +1266,14 @@ return function(deps)
 				if maxJuice and gained >= maxJuice then
 					break
 				end
-				if util.juiceCount() >= config.farm.sellAt then
+				-- Yield to the loop only when something must happen: the
+				-- hold cap, or a pending dump/sell/convert. A hold below
+				-- the cap keeps swinging - that juice is value waiting for
+				-- the machines and the round-end dump.
+				if util.juiceCount() >= config.farm.holdCap then
+					break
+				end
+				if util.sellActionPending() then
 					break
 				end
 
@@ -2376,14 +2071,26 @@ return function(deps)
 				flyConn:Disconnect()
 				flyConn = nil
 			end
+			local char = util.character()
+			local root = util.root()
+			local hum = util.humanoid()
+			-- The fly loop parks the humanoid in Physics every frame; without
+			-- an explicit recovery the character stays frozen and cannot walk
+			-- again after the toggle goes off.
+			if root then
+				root.AssemblyLinearVelocity = Vector3.zero
+			end
+			if hum then
+				hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+				if hum:GetState() == Enum.HumanoidStateType.Physics then
+					hum:ChangeState(Enum.HumanoidStateType.Running)
+				end
+			end
 			-- Give collisions back unless the Noclip toggle wants them off.
-			if not state.enabled("Noclip") then
-				local char = util.character()
-				if char then
-					for _, part in ipairs(char:GetDescendants()) do
-						if part:IsA("BasePart") then
-							part.CanCollide = true
-						end
+			if not state.enabled("Noclip") and char then
+				for _, part in ipairs(char:GetDescendants()) do
+					if part:IsA("BasePart") then
+						part.CanCollide = true
 					end
 				end
 			end
@@ -2822,6 +2529,186 @@ return function(deps)
 		return n
 	end
 
+	-- The three juice tiers, split by name: plain MoonJuice (15/stack),
+	-- "Ionized MoonJuice" (20), "Anti Matter MoonJuice" (74).
+	function util.isIon(tool: Instance): boolean
+		return string.find(string.lower(tool.Name), "ion", 1, true) ~= nil
+	end
+
+	function util.isAnti(tool: Instance): boolean
+		return string.find(string.lower(tool.Name), "anti", 1, true) ~= nil
+	end
+
+	function util.plainJuiceCount(): number
+		local n = 0
+		for _, entry in ipairs(util.juiceTools()) do
+			if not util.isIon(entry.tool) and not util.isAnti(entry.tool) then
+				n += 1
+			end
+		end
+		return n
+	end
+
+	function util.antiJuiceCount(): number
+		local n = 0
+		for _, entry in ipairs(util.juiceTools()) do
+			if util.isAnti(entry.tool) then
+				n += 1
+			end
+		end
+		return n
+	end
+
+	-- How many anti-matter stacks can be sold RIGHT NOW without touching a
+	-- non-anti stack. MEASURED (2026-10-07, job "sell-order"): the server
+	-- sells the OLDEST tools first, in Backpack insertion order - firing
+	-- (1,false) with [MoonJuice, Ionized] aboard removed the MoonJuice, and
+	-- the game's own sell preview sums `first N` the same way. So the safe
+	-- subset = the leading run of anti-matter tools; anything behind an
+	-- older plain/ion stack stays held until it converts (or the round
+	-- end dump fires).
+	function util.sellableAnti(): number
+		local list = util.juiceTools()
+		local n = 0
+		for i = 1, #list do
+			if util.isAnti(list[i].tool) then
+				n += 1
+			else
+				break
+			end
+		end
+		return n
+	end
+
+	-- Sells ONLY the leading anti-matter run (the game's own "sell N"
+	-- contract: (count, false)). Returns the stacks sold.
+	function util.sellAnti(): number
+		local n = util.sellableAnti()
+		if n == 0 then
+			return 0
+		end
+		local events = ReplicatedStorage:FindFirstChild("Events")
+		local remote = events and events:FindFirstChild("SellMoonjuice")
+		if remote then
+			(remote :: RemoteEvent):FireServer(n, false)
+		end
+		return n
+	end
+
+	-- Is any sell/convert action actually pending right now? Used to decide
+	-- whether a swing batch must yield; a plain hold below the cap keeps
+	-- mining (stacking for the round-end dump) instead of spinning. The
+	-- conversion check mirrors the loop's threshold: below sellAt the
+	-- machines are deliberately NOT used yet, so they are not "pending".
+	function util.sellActionPending(): boolean
+		if util.juiceCount() == 0 then
+			return false
+		end
+		if util.roundEndSoon() then
+			return true
+		end
+		if util.sellableAnti() > 0 then
+			return true
+		end
+		if util.juiceCount() >= config.farm.sellAt then
+			if util.ionJuiceCount() > 0 and util.converterPrompt() then
+				return true
+			end
+			if util.plainJuiceCount() > 0 and util.ionizerPrompt() then
+				return true
+			end
+		end
+		return false
+	end
+
+	---------------------------------------------------------------- round end
+	-- Values.ClientSeconds is the story clock; it resets when the round
+	-- restarts (measured: 3527 -> 5 after the final story chain).
+	function util.storyClock(): number
+		local values = ReplicatedStorage:FindFirstChild("Values")
+		local cs = values and values:FindFirstChild("ClientSeconds")
+		return cs and (cs :: NumberValue).Value or 0
+	end
+
+	-- End-of-round signals, MEASURED on the restart the round-end watcher
+	-- caught (round ended at ClientSeconds=3527):
+	--   * The final story chain arrives over the Text remote shortly before
+	--     the hard reset: "THE DYSON SPHERE GOT DESTROYED!" (~20s to go)
+	--     and "THE SUN IS MOVING! ..." (~10s). Both are inside the user's
+	--     ~30s dump window.
+	--   * PlayerGui.Fim ("The End") as generic backup - it NEVER enabled in
+	--     the measured round, so it cannot be the only signal.
+	--   * config.farm.roundLength clock threshold, disabled (0) until the
+	--     watcher proves the length constant - measured rounds ended at
+	--     2854 and 3527, so it is NOT constant.
+	-- The flag clears itself when the clock rewinds: that is a new round.
+	local END_MARKERS = {
+		"dyson sphere got destroyed",
+		"the sun is moving",
+	}
+	local endMarker = false
+	local endClock = 0
+	local endWatch: RBXScriptConnection? = nil
+
+	local function hookEndWatch()
+		if endWatch then
+			return
+		end
+		local events = ReplicatedStorage:FindFirstChild("Events")
+		local remote = events and events:FindFirstChild("Text")
+		if remote then
+			endWatch = (remote :: RemoteEvent).OnClientEvent:Connect(function(msg)
+				if typeof(msg) ~= "string" then
+					return
+				end
+				local low = string.lower(msg)
+				for _, marker in ipairs(END_MARKERS) do
+					if string.find(low, marker, 1, true) then
+						endMarker = true
+						return
+					end
+				end
+			end)
+		end
+	end
+	hookEndWatch()
+
+	-- Called on shutdown/reload so the old bundle's listener cannot keep
+	-- setting the flag after a live-reload.
+	function util.stop()
+		if endWatch then
+			endWatch:Disconnect()
+			endWatch = nil
+		end
+	end
+
+	-- The round is about to restart: everything in the backpack is lost, so
+	-- the farm dumps the whole stack regardless of tier.
+	function util.roundEndSoon(): boolean
+		local cs = util.storyClock()
+		if cs < endClock then
+			-- clock rewind = a fresh round; the old round's warning expires
+			endMarker = false
+		end
+		endClock = cs
+		if endMarker then
+			return true
+		end
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		local fim = pg and pg:FindFirstChild("Fim")
+		if fim and (fim :: ScreenGui).Enabled then
+			return true
+		end
+		local len = config.farm.roundLength
+		if len and len > 0 then
+			local win = config.farm.endDumpWindow or 30
+			if cs >= len - win then
+				return true
+			end
+		end
+		return false
+	end
+
 	-- The only conversion interface in the game: the SpaceStation's
 	-- "Insert Moonjuice" prompt (2.0s hold, 10 studs, line of sight).
 	-- Buildings phase in and out, so this resolves freshly every call.
@@ -2837,6 +2724,37 @@ return function(deps)
 			local prompt = well and well:FindFirstChildWhichIsA("ProximityPrompt", true)
 			if prompt then
 				return prompt
+			end
+		end
+		return nil
+	end
+
+	-- The ionizer (plain -> ion) is the first link of the chain and it is
+	-- phase/buy gated: a planet only gets one once its colony is built, so
+	-- the exact hierarchy was not stable enough to hardcode yet. Resolve
+	-- freshly with a short cache: any prompt whose own text or machine name
+	-- talks about ionizing (the converter is excluded by identity so its
+	-- "Insert Moonjuice" can never be mistaken for it). Measured cost: a
+	-- full workspace descendant scan, hence the 2s TTL.
+	local ionizerCache: ProximityPrompt? = nil
+	local ionizerAt = 0
+	function util.ionizerPrompt(): ProximityPrompt?
+		if os.clock() - ionizerAt < 2 then
+			return ionizerCache
+		end
+		ionizerAt = os.clock()
+		ionizerCache = nil
+		local conv = util.converterPrompt()
+		for _, d in ipairs(workspace:GetDescendants()) do
+			if d:IsA("ProximityPrompt") and d ~= conv then
+				local holder = d.Parent
+				local hay = string.lower(
+					d.ActionText .. " " .. d.ObjectText .. " " .. (holder and holder.Name or "")
+				)
+				if string.find(hay, "ioniz", 1, true) or string.find(hay, "ionmoon", 1, true) then
+					ionizerCache = d
+					return ionizerCache
+				end
 			end
 		end
 		return nil
@@ -3293,7 +3211,6 @@ local util = fetchModule("util")({ config = config })
 local perf = fetchModule("perf")({ config = config })
 local esp = fetchModule("esp")({ config = config, state = state, util = util })
 local farm = fetchModule("farm")({ config = config, state = state, util = util })
-local combat = fetchModule("combat")({ config = config, state = state, util = util })
 local travel = fetchModule("travel")({ config = config, state = state, util = util })
 local rewards = fetchModule("rewards")({ config = config, state = state, util = util })
 
@@ -3333,7 +3250,6 @@ end)
 local farmTab = window:CreateTab({ name = "Farm" })
 local espTab = window:CreateTab({ name = "ESP" })
 local travelTab = window:CreateTab({ name = "Travel" })
-local combatTab = window:CreateTab({ name = "Combat" })
 local settingsTab = window:CreateTab({ name = "Settings" })
 
 -- Farm -------------------------------------------------------------------
@@ -3398,6 +3314,7 @@ local creditsStat = ui.stat(farmTab, { name = "Credits", value = util.credits() 
 local juiceStat = ui.stat(farmTab, { name = "MoonJuice on hand", value = util.juiceValue() })
 local farmStat = ui.text(farmTab, { name = "Farm", text = "idle" })
 local converterStat = ui.text(farmTab, { name = "Converters built", text = "checking..." })
+local sellStat = ui.text(farmTab, { name = "Sell policy", text = "checking..." })
 
 ui.section(farmTab, "Income")
 
@@ -3486,37 +3403,10 @@ ui.toggle(travelTab, "Fly", {
 })
 ui.slider(travelTab, "FlySpeed", {
 	name = "Fly speed",
-	description = "Studs per second = value x 60. 8 is ~480/s.",
-	range = { 0.5, 16 },
-	increment = 0.5,
+	description = "Studs per second = value x 60. 8 is ~480/s, 32 is ~1920/s.",
+	range = { 8, 32 },
+	increment = 1,
 	value = config.travel.flySpeed,
-})
-
--- Combat -----------------------------------------------------------------
-ui.section(combatTab, "Keep distance")
-
-ui.toggle(combatTab, "Avoid", {
-	name = "Keep distance",
-	description = "Step away when a monster gets too close.",
-})
-
-ui.section(combatTab, "Gun mods")
-
-ui.toggle(combatTab, "GunRapid", {
-	name = "No cooldown",
-	description = "Rail/Rocket refire as fast as the server answers. Moon Gun (HexSpitter): keeps its own fire loop running, perfect accuracy, damage pinned to max. You aim - the mod never moves your camera.",
-})
-ui.toggle(combatTab, "GunVolley", {
-	name = "Volley",
-	description = "Every rail shot sprays every monster in range; the Moon Gun switches to multi-pellet bursts. Bigger hitbox client-side - what the server kills is its call.",
-})
-
-ui.section(combatTab, "Moon event")
-
-ui.toggle(combatTab, "MoonAttack", {
-	name = "Boss & monster swings",
-	description = "When a Moon event turns you into the Moon boss or a moon monster, swings fire on their own at the game's own cooldown, aimed where your camera looks. Idle until the game assigns you the role.",
-	value = true,
 })
 
 -- Settings ---------------------------------------------------------------
@@ -3638,19 +3528,6 @@ state.on("Fly", function()
 end)
 state.on("FlySpeed", applyFlySpeed)
 
-state.on("Avoid", function()
-	combat.sync()
-end)
-state.on("GunRapid", function()
-	combat.sync()
-end)
-state.on("GunVolley", function()
-	combat.sync()
-end)
-state.on("MoonAttack", function()
-	combat.sync()
-end)
-
 state.on("AutoRewards", function()
 	rewards.sync()
 end)
@@ -3686,7 +3563,6 @@ end)
 farm.sync()
 esp.sync()
 travel.sync()
-combat.sync()
 rewards.sync()
 rewards.start()
 if state.get("NoRender") == nil then
@@ -3737,6 +3613,50 @@ task.spawn(function()
 				converterStat:Set(#list > 0 and table.concat(list, ", ") or "none built")
 			end)
 		end
+		if sellStat then
+			update("sell", function()
+				-- Tier breakdown + which machines can eat it + where the
+				-- round clock stands. Plain/ion are held by policy; only the
+				-- leading anti run sells (oldest-first server semantics).
+				local plain = util.plainJuiceCount()
+				local ion = util.ionJuiceCount()
+				local anti = util.antiJuiceCount()
+				local tiers = {}
+				if plain > 0 then
+					table.insert(tiers, plain .. " plain")
+				end
+				if ion > 0 then
+					table.insert(tiers, ion .. " ion")
+				end
+				if anti > 0 then
+					table.insert(tiers, anti .. " anti")
+				end
+				local held = #tiers > 0 and table.concat(tiers, ", ") or "empty"
+				local machines = {}
+				if util.ionizerPrompt() then
+					table.insert(machines, "ionizer")
+				end
+				if util.converterPrompt() then
+					table.insert(machines, "converter")
+				end
+				local mach = #machines > 0 and table.concat(machines, "+") or "none"
+				local cs = util.storyClock()
+				local clock = string.format(
+					"%d:%02d",
+					math.floor(cs / 60),
+					math.floor(cs % 60)
+				)
+				sellStat:Set(
+					string.format(
+						"%s | machines: %s | round %s%s",
+						held,
+						mach,
+						clock,
+						util.roundEndSoon() and " - DUMPING" or ""
+					)
+				)
+			end)
+		end
 		if questStat then
 			update("quests", function()
 				questStat:Set(rewards.stats())
@@ -3785,11 +3705,11 @@ end)
 ------------------------------------------------------------------ shutdown
 shutdown = function()
 	farm.stop()
-	combat.stop()
 	esp.stop()
 	travel.stop()
 	rewards.stop()
 	util.stopAim()
+	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
 		pcall(function()
 			blackGui:Destroy()
@@ -3817,7 +3737,6 @@ if getgenv then
 		perf = perf,
 		esp = esp,
 		farm = farm,
-		combat = combat,
 		travel = travel,
 		rewards = rewards,
 	}

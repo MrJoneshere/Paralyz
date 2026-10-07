@@ -12,8 +12,23 @@ return {
 		swingDelay = 0.35,
 		-- Camera stand-off distance from the rock while aiming.
 		aimDistance = 35,
-		-- Sell once this many MoonJuice stacks are sitting in the Backpack.
+		-- Convert threshold: once this many stacks are aboard, the farm
+		-- walks them through the ionizer/converter chain. Antimatter is
+		-- sold whenever it leads the stack (see util.sellableAnti), so
+		-- this no longer gates the sell itself.
 		sellAt = 10,
+		-- Hold ceiling: with no conversion machines available the farm
+		-- keeps stacking plain/ion juice (it is all dumped at round end),
+		-- but pauses mining at this many stacks so the backpack can never
+		-- clog and dead swings cannot pile up.
+		holdCap = 16,
+		-- Round length in story seconds (Values.ClientSeconds), measured
+		-- from the round-end watcher. 0 = still unknown, which disables
+		-- the clock-based dump; the Fim "The End" screen always dumps.
+		roundLength = 0,
+		-- Dump everything when the clock is within this many seconds of
+		-- roundLength (the user's ~30s rule).
+		endDumpWindow = 30,
 		-- Rocks stream by proximity and in waves: when the folders are empty,
 		-- wait this long and look again.
 		noRockDelay = 4,
@@ -89,29 +104,6 @@ return {
 			juice = Color3.fromRGB(255, 214, 96),
 			rock = Color3.fromRGB(210, 210, 210),
 		},
-	},
-
-	combat = {
-		-- Keep-distance when Avoid is on: monsters inside this radius trigger a step back.
-		avoidRadius = 14,
-		-- Gun mods: refire cadence while a mod is armed, and the range the
-		-- volley sprays monsters at. Client-side only - server rate limits
-		-- and damage math are not writable from here.
-		gunDelay = 0.4,
-		gunRange = 800,
-		-- HexSpitter ("Moon Gun"): its LocalScript fire loop reads these
-		-- Configuration values client-side, so pinning them has real effect.
-		-- FireRate = seconds between bursts (stock 0.06); the loop is bound
-		-- by remote round-trips anyway, so this is a feel knob, not a kick
-		-- risk. hexPellets raises Burst.Bullets.MaxValue: more pellets per
-		-- trigger at a slower cycle (true volley semantics).
-		hexFireRate = 0.02,
-		hexPellets = 8,
-		-- Moon boss / moon monster role swings: mirror the client cooldowns
-		-- inside the game's own MoonBoss/MoonMonsterPlayerControls so our
-		-- remote cadence is indistinguishable from a clicking player.
-		moonBossDelay = 0.35,
-		moonMonsterDelay = 0.65,
 	},
 
 	travel = {
