@@ -330,6 +330,19 @@ Also `ReplicatedStorage.SpaceShipControl` (RemoteEvent) and `ReplicatedStorage.V
 you. Monsters themselves are `Moonfected` models under `Workspace.Unanchored.SmallMoonMonsters`
 (Humanoid 100/100); `MoonMonsters` was empty in the sessions checked.
 
+**Moon boss / monster player roles (decoded 2026-10-07, shipped as the `MoonAttack` toggle):** the
+server assigns a role by setting character attributes — `MoonBossPlayer` or `MoonMonsterPlayer`.
+Both `MoonBossPlayerControls` and `MoonMonsterPlayerControls` are click/F/R2 handlers that:
+1. gate on their attribute (boss wins: monster control also requires `MoonBossPlayer ~= true`),
+2. enforce a client cooldown — **boss 0.35s, monster 0.65s**,
+3. set a pulse attribute on the character — `MoonBossAttackPulse` / `MoonMonsterAttackPulse`,
+   stamped with `os.clock()`; the matching `*ClientAnimator` scripts read it to play the swing,
+4. fire `Events.<Role>.Attack:FireServer(cameraLookVector)` (fallback: HRP look vector).
+
+Paralyz `MoonAttack` (default on) replays that exact protocol from a background loop: same remotes,
+payload, cooldowns and pulse stamps, and it *defers* when a fresh vanilla pulse arrives so a user
+clicking manually keeps exactly the vanilla rate. No input synthesis, no camera movement.
+
 ## Session mechanics (client hub)
 
 - **The stance hold wins every fight it is not told about.** `farm.luau` pins `root.CFrame` per
