@@ -120,5 +120,15 @@ return function(deps)
 		end)
 	end
 
+	-- A titled text card. Rayfield Gen2's Stat:Set() asserts typeof == 'number',
+	-- so a string stat throws every update and the element stays frozen at its
+	-- initial value - anything that reports words (farm phase, quest summary,
+	-- threat ETA) belongs here instead.
+	function ui.text(tab, props)
+		return guard("text", function()
+			return tab:CreateText(props)
+		end)
+	end
+
 	return ui
 end

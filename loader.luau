@@ -159,8 +159,8 @@ ui.section(farmTab, "Wallet")
 
 local creditsStat = ui.stat(farmTab, { name = "Credits", value = util.credits() })
 local juiceStat = ui.stat(farmTab, { name = "MoonJuice on hand", value = util.juiceValue() })
-local farmStat = ui.stat(farmTab, { name = "Farm", value = "idle" })
-local converterStat = ui.stat(farmTab, { name = "Converters built", value = "..." })
+local farmStat = ui.text(farmTab, { name = "Farm", text = "idle" })
+local converterStat = ui.text(farmTab, { name = "Converters built", text = "checking..." })
 
 ui.section(farmTab, "Income")
 
@@ -170,7 +170,7 @@ ui.toggle(farmTab, "AutoRewards", {
 	value = true,
 })
 
-local questStat = ui.stat(farmTab, { name = "Quests", value = "checking..." })
+local questStat = ui.text(farmTab, { name = "Quests", text = "checking..." })
 
 -- ESP --------------------------------------------------------------------
 ui.section(espTab, "Overlays")
@@ -232,6 +232,10 @@ ui.button(travelTab, {
 		end
 	end,
 })
+
+ui.section(travelTab, "World Phase")
+
+local threatStat = ui.text(travelTab, { name = "Next threat", text = "reading..." })
 
 ui.section(travelTab, "Movement")
 
@@ -445,28 +449,87 @@ end
 
 -------------------------------------------------------------- live stats
 task.spawn(function()
+	local lastStatErrs: { [string]: boolean } = {}
+	-- One guard per stat: a broken updater must not starve the ones after
+	-- it (they shared a single pcall, so one throw froze every later stat
+	-- at its initial value), and each unique failure is surfaced exactly
+	-- once instead of spamming the console every cycle.
+	local function update(what: string, fn: () -> ())
+		local ok, err = pcall(fn)
+		if not ok then
+			local msg = what .. ": " .. tostring(err)
+			if not lastStatErrs[msg] then
+				lastStatErrs[msg] = true
+				warn("[Paralyz] live stats - " .. msg)
+			end
+		end
+	end
 	while true do
 		if window.unloaded then
 			break
 		end
-		pcall(function()
-			if creditsStat then
+		if creditsStat then
+			update("credits", function()
 				creditsStat:Set(util.credits())
-			end
-			if juiceStat then
+			end)
+		end
+		if juiceStat then
+			update("juice", function()
 				juiceStat:Set(util.juiceValue())
-			end
-			if farmStat then
+			end)
+		end
+		if farmStat then
+			update("farm", function()
 				farmStat:Set(farm.isRunning() and farm.stats() or "idle")
-			end
-			if converterStat then
+			end)
+		end
+		if converterStat then
+			update("converters", function()
 				local list = util.converters()
 				converterStat:Set(#list > 0 and table.concat(list, ", ") or "none built")
-			end
-			if questStat then
+			end)
+		end
+		if questStat then
+			update("quests", function()
 				questStat:Set(rewards.stats())
-			end
-		end)
+			end)
+		end
+		if threatStat then
+			update("threat", function()
+				-- PlanetTracker warp countdowns: the most urgent active
+				-- threat (same pick as the game's own progress bar).
+				local text = "none incoming"
+				local pt = workspace:FindFirstChild("PlanetTracker")
+				if pt then
+					local now = workspace:GetServerTimeNow()
+					local bestName, bestEta, anyActive
+					for _, c in ipairs(pt:GetChildren()) do
+						if c:GetAttribute("WarpActive") == true then
+							anyActive = c.Name
+							local t = c:GetAttribute("WarpTime")
+							local s = c:GetAttribute("WarpStart")
+							if typeof(t) == "number" and typeof(s) == "number" and t > 0 then
+								local eta = (s + t) - now
+								if eta > 0 and (not bestEta or eta < bestEta) then
+									bestName, bestEta = c.Name, eta
+								end
+							end
+						end
+					end
+					if bestName then
+						text = string.format(
+							"%s in %d:%02d",
+							bestName,
+							math.floor(bestEta / 60),
+							math.floor(bestEta % 60)
+						)
+					elseif anyActive then
+						text = anyActive .. " active"
+					end
+				end
+				threatStat:Set(text)
+			end)
+		end
 		task.wait(2)
 	end
 end)
