@@ -333,6 +333,57 @@ return function(deps)
 		return false
 	end
 
+	-- Ion juice is worth more as anti matter: walk the stack through the
+	-- SpaceStation converter before the sell. Measured: InputHoldBegin/End
+	-- DOES trigger the machine (prompt.Triggered fires after the2s hold)
+	-- and the machine takes ion only - one hold per stack, each verified
+	-- by the ion count dropping; a hold that consumes nothing aborts
+	-- instead of looping. Anti matter stacks carry Credits, so the normal
+	-- sellAll that follows picks them up.
+	local function convertIon(): number
+		local prompt = util.converterPrompt()
+		if not prompt then
+			report("ion juice aboard but no converter machine exists in this world", true)
+			return 0
+		end
+		local holder = prompt.Parent
+		local well = if holder and (holder :: Instance):IsA("BasePart")
+			then (holder :: BasePart)
+			else if holder then (holder :: any):FindFirstChildWhichIsA("BasePart", true) else nil
+		if not well then
+			return 0
+		end
+		setPhase("converting ion juice")
+		-- Hold-aware teleport: the stance pin would otherwise snap the
+		-- character straight back to the rock we left.
+		rotateTeleport(CFrame.new(well.Position + Vector3.new(0, 3, 0)))
+		task.wait(0.6)
+		local converted = 0
+		for _ = 1, math.min(util.ionJuiceCount(), 20) do
+			local before = util.ionJuiceCount()
+			if before <= 0 then
+				break
+			end
+			pcall(function()
+				prompt:InputHoldBegin()
+				task.wait((prompt :: ProximityPrompt).HoldDuration + 0.6)
+				prompt:InputHoldEnd()
+			end)
+			task.wait(0.8)
+			local after = util.ionJuiceCount()
+			if after < before then
+				converted += before - after
+			else
+				report("converter rejected the hold - moving on", true)
+				break
+			end
+		end
+		if converted > 0 then
+			report(string.format("converted %d ion -> anti matter", converted), true)
+		end
+		return converted
+	end
+
 	------------------------------------------------------------------- loop
 	local function runLoop(opts)
 		local maxCycles = opts and opts.maxCycles
@@ -381,6 +432,11 @@ return function(deps)
 
 			-- Sell before the stack fills so the backpack never clogs.
 			if util.juiceCount() >= config.farm.sellAt then
+				-- Convert first when ion stacks are aboard: the machine
+				-- pays more than selling the ion straight.
+				if state.enabled("AutoConvert") and util.ionJuiceCount() > 0 then
+					convertIon()
+				end
 				local count = util.sellAll()
 				if count > 0 then
 					sold += count

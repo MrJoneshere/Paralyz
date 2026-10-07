@@ -276,6 +276,23 @@ return {
 		-- Fly speed, studs per second is this times 60: 8 -> ~480 studs/s,
 		-- which crosses the 10k-stud gaps between planets in a usable time.
 		flySpeed = 8,
+		-- Hubs are folders of structures that stream with distance: from the
+		-- far side of the world their resolve() is nil even though they
+		-- exist (measured: Bunker folder present, zero BaseParts loaded at
+		-- 11k studs). These are their measured spawn-area coordinates, used
+		-- only as "go stand here until it loads" anchors - travel re-resolves
+		-- and re-lands after the wait, so stale coords never become landings.
+		hubFallbacks = {
+			Bunker = Vector3.new(725, 3033, -1332),
+			City = Vector3.new(654, 3063, -1230),
+		},
+	},
+
+	rewards = {
+		-- How often the daily/weekly quest list is polled for claims.
+		-- Playtime chests are push (event listener), so this only covers
+		-- quests -45s keeps Knit calls negligible.
+		pollDelay = 45,
 	},
 
 	perf = {
@@ -1004,6 +1021,57 @@ return function(deps)
 		return false
 	end
 
+	-- Ion juice is worth more as anti matter: walk the stack through the
+	-- SpaceStation converter before the sell. Measured: InputHoldBegin/End
+	-- DOES trigger the machine (prompt.Triggered fires after the2s hold)
+	-- and the machine takes ion only - one hold per stack, each verified
+	-- by the ion count dropping; a hold that consumes nothing aborts
+	-- instead of looping. Anti matter stacks carry Credits, so the normal
+	-- sellAll that follows picks them up.
+	local function convertIon(): number
+		local prompt = util.converterPrompt()
+		if not prompt then
+			report("ion juice aboard but no converter machine exists in this world", true)
+			return 0
+		end
+		local holder = prompt.Parent
+		local well = if holder and (holder :: Instance):IsA("BasePart")
+			then (holder :: BasePart)
+			else if holder then (holder :: any):FindFirstChildWhichIsA("BasePart", true) else nil
+		if not well then
+			return 0
+		end
+		setPhase("converting ion juice")
+		-- Hold-aware teleport: the stance pin would otherwise snap the
+		-- character straight back to the rock we left.
+		rotateTeleport(CFrame.new(well.Position + Vector3.new(0, 3, 0)))
+		task.wait(0.6)
+		local converted = 0
+		for _ = 1, math.min(util.ionJuiceCount(), 20) do
+			local before = util.ionJuiceCount()
+			if before <= 0 then
+				break
+			end
+			pcall(function()
+				prompt:InputHoldBegin()
+				task.wait((prompt :: ProximityPrompt).HoldDuration + 0.6)
+				prompt:InputHoldEnd()
+			end)
+			task.wait(0.8)
+			local after = util.ionJuiceCount()
+			if after < before then
+				converted += before - after
+			else
+				report("converter rejected the hold - moving on", true)
+				break
+			end
+		end
+		if converted > 0 then
+			report(string.format("converted %d ion -> anti matter", converted), true)
+		end
+		return converted
+	end
+
 	------------------------------------------------------------------- loop
 	local function runLoop(opts)
 		local maxCycles = opts and opts.maxCycles
@@ -1052,6 +1120,11 @@ return function(deps)
 
 			-- Sell before the stack fills so the backpack never clogs.
 			if util.juiceCount() >= config.farm.sellAt then
+				-- Convert first when ion stacks are aboard: the machine
+				-- pays more than selling the ion straight.
+				if state.enabled("AutoConvert") and util.ionJuiceCount() > 0 then
+					convertIon()
+				end
 				local count = util.sellAll()
 				if count > 0 then
 					sold += count
@@ -1323,6 +1396,206 @@ return function(deps)
 	return perf
 end
 ]==],
+	["rewards"] = [==[
+--!strict
+-- Paralyz / src/rewards.luau
+-- Free income that needs no player input.
+--
+-- Two paths, both measured safe in earlier sessions:
+--   * Playtime: the server pushes Events.PlaytimeReward {Action = "Ready"}
+--     on its1800s cycle; answering with Events.PlaytimeClaim:FireServer()
+--     pays the chest. Pure listener - no polling, no input.
+--   * Daily/Weekly quests: Knit QuestService:GetQuests() (may return a
+--     table or a promise - both handled), then ClaimQuest(kind, id) for
+--     anything Complete and not Claimed. A Daily claim paid +150 credits
+--     when first verified.
+--
+-- The poll also gives the menu something honest to show: what is ready.
+
+return function(deps)
+	local config = deps.config
+	local state = deps.state
+	local util = deps.util
+
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+	local rewards = {}
+
+	local running = false
+	local playtimeConn: RBXScriptConnection? = nil
+	local claimedNow = 0
+	local lastSummary = "not checked yet"
+
+	------------------------------------------------------------- playtime
+	local function startPlaytime()
+		if playtimeConn then
+			return
+		end
+		local events = ReplicatedStorage:FindFirstChild("Events")
+		local reward = events and events:FindFirstChild("PlaytimeReward")
+		local claim = events and events:FindFirstChild("PlaytimeClaim")
+		if not (reward and claim) then
+			return
+		end
+		playtimeConn = (reward :: RemoteEvent).OnClientEvent:Connect(function(a1, a2)
+			-- Payload shape observed as a table {Action = "Ready"}; accept a
+			-- bare "Ready" string too rather than miss the window.
+			local ready = (type(a1) == "table" and (a1 :: any).Action == "Ready")
+				or a1 == "Ready"
+				or (type(a2) == "table" and (a2 :: any).Action == "Ready")
+			if not ready then
+				return
+			end
+			pcall(function()
+				(claim :: RemoteEvent):FireServer()
+			end)
+			claimedNow += 1
+			util.notify("Playtime", "chest ready - claimed")
+		end)
+	end
+
+	local function stopPlaytime()
+		if playtimeConn then
+			playtimeConn:Disconnect()
+			playtimeConn = nil
+		end
+	end
+
+	---------------------------------------------------------------- quests
+	local function getQuestService(): any?
+		local ok, knit = pcall(function()
+			return require(ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Knit"))
+		end)
+		if not ok then
+			return nil
+		end
+		local ok2, service = pcall(function()
+			return (knit :: any).GetService("QuestService")
+		end)
+		if not ok2 then
+			return nil
+		end
+		return service
+	end
+
+	local function fetchQuests(service: any): { [string]: any }?
+		local ok, res = pcall(function()
+			return service:GetQuests()
+		end)
+		if not ok then
+			return nil
+		end
+		-- Knit may hand back a promise; await it inside the same guard.
+		if typeof(res) == "Promise" then
+			local ok2, val = pcall(function()
+				return (res :: any):await()
+			end)
+			if not ok2 then
+				return nil
+			end
+			res = val
+		end
+		if type(res) ~= "table" then
+			return nil
+		end
+		return res
+	end
+
+	-- One pass: claim everything ready, summarise the rest. Returns the
+	-- number of claims fired.
+	function rewards.claimReady(): number
+		local service = getQuestService()
+		if not service then
+			return 0
+		end
+		local quests = fetchQuests(service)
+		if not quests then
+			return 0
+		end
+		local claimed = 0
+		local ready = 0
+		local total = 0
+		for _, kind in ipairs({ "Daily", "Weekly" }) do
+			local bucket = (quests :: any)[kind]
+			if type(bucket) == "table" then
+				for _, quest in pairs(bucket) do
+					if type(quest) == "table" then
+						total += 1
+						if (quest :: any).Complete and not (quest :: any).Claimed then
+							ready += 1
+							local ok = pcall(function()
+								service:ClaimQuest(kind, (quest :: any).Id)
+							end)
+							if ok then
+								claimed += 1
+								local reward = (quest :: any).Reward
+								util.notify(
+									"Quest claimed",
+									string.format(
+										"%s: %s (+%s %s)",
+										kind,
+										(quest :: any).Name or (quest :: any).Id,
+										reward and tostring(reward.Amount) or "?",
+										reward and tostring(reward.Type) or "reward"
+									)
+								)
+							end
+							task.wait(0.3) -- one claim at a time, politely
+						end
+					end
+				end
+			end
+		end
+		claimedNow += claimed
+		lastSummary = ready > 0
+				and string.format("%d ready / %d total - claimed %d", ready, total, claimed)
+			or string.format("all clear - %d quests tracked", total)
+		return claimed
+	end
+
+	----------------------------------------------------------------- loop
+	local function pollLoop()
+		while running do
+			if state.enabled("AutoRewards") then
+				pcall(function()
+					rewards.claimReady()
+				end)
+			end
+			task.wait(config.rewards.pollDelay)
+		end
+	end
+
+	function rewards.start(): boolean
+		if running then
+			return false
+		end
+		running = true
+		startPlaytime()
+		task.spawn(pollLoop)
+		return true
+	end
+
+	function rewards.stop()
+		running = false
+		stopPlaytime()
+	end
+
+	function rewards.sync()
+		-- The listener runs regardless (a free chest arriving while the
+		-- toggle is off should still be grabbed); the poll only claims
+		-- quests while AutoRewards is on.
+		if not playtimeConn then
+			startPlaytime()
+		end
+	end
+
+	function rewards.stats(): string
+		return string.format("%d claimed - %s", claimedNow, lastSummary)
+	end
+
+	return rewards
+end
+]==],
 	["state"] = [==[
 --!strict
 -- Paralyz / src/state.luau
@@ -1521,18 +1794,36 @@ return function(deps)
 		end
 
 		local pos = entry.resolve()
+		-- blind = we are teleporting without a fresh resolve (remembered or
+		-- seeded coordinate): the destination then gets a load wait and a
+		-- verified re-landing, exactly like planets do.
+		local blind = false
 		if not pos then
 			-- Unloaded but visited this session: go to where it was and let
 			-- the load bring it back (checked again after the wait below).
 			local cached = known[entry.name]
 			if cached then
-				util.notify("Teleport", entry.name .. " is not loaded - going to its last position")
 				pos = cached
+				blind = true
+				util.notify("Teleport", entry.name .. " is not loaded - going to its last position")
 			end
 		end
 		if not pos then
-			-- The requested place is not in this world phase: fall back to a
-			-- sibling in the same group instead of failing outright.
+			-- Never visited this session but the hub has a measured spawn
+			-- anchor: standing on it streams the structure back in. Without
+			-- this, a hub request from across the world silently fell back
+			-- to a different hub (Bunker -> Venus City).
+			local seeded = config.travel.hubFallbacks[entry.name]
+			if seeded then
+				pos = seeded
+				blind = true
+				util.notify("Teleport", entry.name .. " is not loaded - going to its usual spot")
+			end
+		end
+		if not pos then
+			-- Genuinely not in this world phase: fall back to a sibling in
+			-- the same group instead of failing outright (fresh resolve, so
+			-- no confirm wait needed for the destination we end up at).
 			for _, alt in ipairs(travel.destinations) do
 				if alt.group == entry.group and alt.name ~= entry.name then
 					local altPos = alt.resolve()
@@ -1562,16 +1853,34 @@ return function(deps)
 		root.CFrame = CFrame.new(land)
 		util.teleported(root.CFrame)
 
-		-- Planets take a few seconds to stream in after you land: wait for
-		-- the load, re-resolve in case the real position differs from the
+		-- The destination may have been teleported to blind, or may be a
+		-- planet whose rocks stream in seconds after arrival: wait for the
+		-- load, re-resolve in case the real position differs from the
 		-- remembered one, and ALWAYS land on the fresh spot afterwards (the
 		-- old code skipped this when re-resolving failed, which is exactly
 		-- the "it loads but never takes me there" the user had to spam past).
-		if entry.group == "planet" then
-			local n = util.settleRocks(pos, config.farm.loadWait, config.farm.streamRadius)
-			local fresh = entry.resolve() or pos
+		if blind or entry.group == "planet" then
+			local n = 0
+			local fresh: Vector3? = nil
+			if entry.group == "planet" then
+				-- Planets prove their load with rocks.
+				n = util.settleRocks(pos, config.farm.loadWait, config.farm.streamRadius)
+				fresh = entry.resolve()
+			else
+				-- Hubs prove it by re-resolving: the folder is always
+				-- there, its structure parts only exist once streamed.
+				local deadline = os.clock() + config.farm.loadWait
+				while os.clock() < deadline do
+					fresh = entry.resolve()
+					if fresh then
+						break
+					end
+					task.wait(0.5)
+				end
+			end
+			fresh = fresh or pos
 			known[entry.name] = fresh
-			-- Re-fetch the root: the wait long enough for a respawn, and a
+			-- Re-fetch the root: the wait is long enough for a respawn, and a
 			-- stale BasePart reference silently does nothing.
 			local landed = false
 			for _ = 1, 4 do
@@ -1592,10 +1901,14 @@ return function(deps)
 			local suffix
 			if not landed then
 				suffix = " - load wait ended but the landing would not stick"
-			elseif n > 0 then
+			elseif entry.group == "planet" and n > 0 then
 				suffix = " - loaded, " .. n .. " rocks"
-			else
+			elseif entry.group == "planet" then
 				suffix = " - still empty after waiting"
+			elseif entry.resolve() then
+				suffix = " - loaded"
+			else
+				suffix = " - did not load, it may not exist in this phase"
 			end
 			util.notify("Teleport", entry.name .. suffix)
 		else
@@ -2088,6 +2401,39 @@ return function(deps)
 		return count
 	end
 
+	-- Ion juice: the anti-matter machine's input. Plain MoonJuice does NOT
+	-- match (measured: a verified hold at the converter consumed nothing
+	-- with5 plain stacks aboard - the machine is ion-only per its labels).
+	function util.ionJuiceCount(): number
+		local n = 0
+		for _, entry in ipairs(util.juiceTools()) do
+			if string.find(string.lower(entry.tool.Name), "ion", 1, true) then
+				n += 1
+			end
+		end
+		return n
+	end
+
+	-- The only conversion interface in the game: the SpaceStation's
+	-- "Insert Moonjuice" prompt (2.0s hold, 10 studs, line of sight).
+	-- Buildings phase in and out, so this resolves freshly every call.
+	function util.converterPrompt(): ProximityPrompt?
+		local planets = workspace:FindFirstChild("Planets")
+		if not planets then
+			return nil
+		end
+		for _, planet in ipairs(planets:GetChildren()) do
+			local station = planet:FindFirstChild("SpaceStation")
+			local machine = station and station:FindFirstChild("ConverterMachine")
+			local well = machine and machine:FindFirstChild("PartProximity")
+			local prompt = well and well:FindFirstChildWhichIsA("ProximityPrompt", true)
+			if prompt then
+				return prompt
+			end
+		end
+		return nil
+	end
+
 	-------------------------------------------------------------------- rocks
 	-- Rocks live in a folder called "Rocks" somewhere under each planet - on
 	-- some planets it is a direct child, on others it hangs off the planet's
@@ -2541,6 +2887,7 @@ local esp = fetchModule("esp")({ config = config, state = state, util = util })
 local farm = fetchModule("farm")({ config = config, state = state, util = util })
 local combat = fetchModule("combat")({ config = config, state = state, util = util })
 local travel = fetchModule("travel")({ config = config, state = state, util = util })
+local rewards = fetchModule("rewards")({ config = config, state = state, util = util })
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -2618,6 +2965,12 @@ ui.toggle(farmTab, "BlackScreen", {
 	description = "Veils the whole screen - game and menu - with black while the farm runs. Input still passes through, so the toggle stays clickable.",
 })
 
+ui.toggle(farmTab, "AutoConvert", {
+	name = "Convert before selling",
+	description = "Ion juice runs through the SpaceStation anti-matter machine first, then everything sells. Measured: the machine rejects plain juice, so this only makes the trip when ion stacks actually exist.",
+	value = true,
+})
+
 ui.button(farmTab, {
 	name = "Sell everything now",
 	description = "Same call the game's own sell button makes.",
@@ -2637,6 +2990,16 @@ local creditsStat = ui.stat(farmTab, { name = "Credits", value = util.credits() 
 local juiceStat = ui.stat(farmTab, { name = "MoonJuice on hand", value = util.juiceValue() })
 local farmStat = ui.stat(farmTab, { name = "Farm", value = "idle" })
 local converterStat = ui.stat(farmTab, { name = "Converters built", value = "..." })
+
+ui.section(farmTab, "Income")
+
+ui.toggle(farmTab, "AutoRewards", {
+	name = "Auto rewards",
+	description = "Claims playtime chests (event push) and any completed daily/weekly quest the moment they are ready. Free income that needs no player input.",
+	value = true,
+})
+
+local questStat = ui.stat(farmTab, { name = "Quests", value = "checking..." })
 
 -- ESP --------------------------------------------------------------------
 ui.section(espTab, "Overlays")
@@ -2864,6 +3227,10 @@ end)
 state.on("GunVolley", function()
 	combat.sync()
 end)
+
+state.on("AutoRewards", function()
+	rewards.sync()
+end)
 state.on("BlackScreen", function(value)
 	setBlackScreen(value == true)
 end)
@@ -2897,6 +3264,8 @@ farm.sync()
 esp.sync()
 travel.sync()
 combat.sync()
+rewards.sync()
+rewards.start()
 if state.get("NoRender") == nil then
 	state.set("NoRender", true)
 else
@@ -2923,6 +3292,9 @@ task.spawn(function()
 				local list = util.converters()
 				converterStat:Set(#list > 0 and table.concat(list, ", ") or "none built")
 			end
+			if questStat then
+				questStat:Set(rewards.stats())
+			end
 		end)
 		task.wait(2)
 	end
@@ -2934,6 +3306,7 @@ shutdown = function()
 	combat.stop()
 	esp.stop()
 	travel.stop()
+	rewards.stop()
 	util.stopAim()
 	if blackGui then
 		pcall(function()
@@ -2964,6 +3337,7 @@ if getgenv then
 		farm = farm,
 		combat = combat,
 		travel = travel,
+		rewards = rewards,
 	}
 end
 

@@ -108,6 +108,38 @@ Both ship in the Backpack as Tools; the client halves are tiny:
   clears the rocket's client `Enabled` gate; `GunVolley` sprays the rail remote at every monster
   in `gunRange`. Server damage math is not client-writable.
 
+## Monsters & combat (measured 2026-10-07)
+
+Two different "monsters" exist and they behave completely differently:
+
+- **Markers** (`Workspace.Unanchored.SmallMoonMonsters/MoonMonsters`, name `Moonfected`, attr
+  `LastHitPlayer=...`): Humanoid(100 or 70 hp) + `Script:AI` + `Script:HitDetector` + Animations,
+  **zero BaseParts on any client**. Because they have no parts: `mouse.Target` can never be them,
+  `GetBoundingBox` is 0×0×0, sword `Touched` cannot reach them, and every damage form tested did
+  nothing - rail `Click:FireServer` with mouse.Hit/pivot/pivot+3/eye-projection/own-feet (camera
+  locked on pivot, 18 studs), 6 sword swings, and `Events.MoonMonster.Attack:FireServer(dir)`
+  (which is gated: silent reject unless the shooter's character has attr `MoonMonsterPlayer`).
+  Treat them as logic/quest counters, not damageable bodies.
+- **Rigs** (transient, `Workspace.Unanchored.MoonMonsters.MoonMonster`, hp **700**, parts=3,
+  mesh `Retopo_Cube.004`, `AnimSaves`, animated client-side by `MoonMonsterClientAnimator` which
+  requires name `MoonMonster`/`MoonMonsterTestAI` or attrs `MoonMonsterRig`/`MoonMonsterPlayer`):
+  spawn roughly once a minute near (700, 4400, -1600) - often high in the air and descending -
+  and vanish again within ~a minute. One volley in a 5-shot battery showed 700→0 on the first
+  shot, but a LATER battery with `mouse.Target` sitting exactly on the rig's own mesh and the
+  remote fired did zero damage, so that kill was almost certainly another player (the spawn area
+  is busy) or a missing ingredient.
+- **Open question being tested**: whether the rail needs a real `Tool.Activated` alongside
+  `Click:FireServer` (the pickaxe's server rule is exactly that: real activation + valid
+  `mouse.Target`). Batteries so far fired the remote ONLY, which may be why they did nothing.
+- Monster-player combat (infection gamepass 1548419084 → `Events.Infected:FireServer(btn)`):
+  while your character has attr `MoonMonsterPlayer`, `MoonMonsterPlayerControls` fires
+  `Events.MoonMonster.Attack:FireServer(camera.LookVector)` on click/F/R2 with a 0.65s client
+  gate - direction-based, no parts needed.
+- Gun client facts: rail = `tool.Click:FireServer(mouse.Hit.p)` (5s wait is icon-only), rocket =
+  server pulls `MouseLoc` + `Tool.Enabled` gate. `Events.GetMouse` is a server→client ask that
+  `PickaxeController` answers with `FireServer(LocalPlayer, mouse.Target)` - the server periodically
+  reads our mouse target, which is why camera aim matters for mining.
+
 ## Converters / anti-matter economy
 
 Buildings are **phase-gated and shared**: they exist in `workspace` only while the phase allows and
@@ -130,8 +162,18 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
 - EarthController buy buttons (FriendIndustries, MoonJuice): `Nuke` 200, `ANuke` 300 (button
   misleadingly named `AntiMatter`), `PluckRadar` 400, `VenusColony` 300, `RecoverEarth` 1200,
   `SpaceStation` 500, plus `ForceField`.
-- Untested probe for the insert: stand at the prompt, `prompt:InputHoldBegin()` → `task.wait(2.5)`
-  → `prompt:InputHoldEnd()` (background-safe input simulation), then diff the Backpack.
+- The insert probe is now **verified end to end**: `prompt:InputHoldBegin()` → `task.wait(2.6)` →
+  `InputHoldEnd()` at 4 studs fires `prompt.Triggered` on the client (so the server got it), and
+  with 5 **plain** stacks aboard nothing was consumed - plain juice is definitively rejected,
+  ion-only as the labels say. The auto-farm now runs this chain (`farm.convertIon`, GUI toggle
+  `AutoConvert`, default on): detect ion stacks by name → hold-aware teleport to the machine →
+  one verified hold per stack (aborts if a hold consumes nothing) → `sellAll` picks up the
+  anti-matter tools (they carry `Credits`).
+- **MoonJuiceTank pickups** (`Workspace.Unanchored`, attr `MoonJuiceTank=true`, ~35 lying around,
+  kids = LocalScript + Beam + Attachment + `Credits` NumberValue): their LocalScript equips a
+  Beam to `Workspace.City.Nuke.Frame.Refuel.Attachment` - tanks fuel the Nuke. Standing on one
+  for 5s does NOT collect it (no pickup trigger found client-side: no prompt, no ClickDetector);
+  collection mechanism still unknown. `Values.Fuel` read 65 and did not move.
 
 
 ## Quests & playtime

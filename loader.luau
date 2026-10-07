@@ -58,6 +58,7 @@ local esp = fetchModule("esp")({ config = config, state = state, util = util })
 local farm = fetchModule("farm")({ config = config, state = state, util = util })
 local combat = fetchModule("combat")({ config = config, state = state, util = util })
 local travel = fetchModule("travel")({ config = config, state = state, util = util })
+local rewards = fetchModule("rewards")({ config = config, state = state, util = util })
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -135,6 +136,12 @@ ui.toggle(farmTab, "BlackScreen", {
 	description = "Veils the whole screen - game and menu - with black while the farm runs. Input still passes through, so the toggle stays clickable.",
 })
 
+ui.toggle(farmTab, "AutoConvert", {
+	name = "Convert before selling",
+	description = "Ion juice runs through the SpaceStation anti-matter machine first, then everything sells. Measured: the machine rejects plain juice, so this only makes the trip when ion stacks actually exist.",
+	value = true,
+})
+
 ui.button(farmTab, {
 	name = "Sell everything now",
 	description = "Same call the game's own sell button makes.",
@@ -154,6 +161,16 @@ local creditsStat = ui.stat(farmTab, { name = "Credits", value = util.credits() 
 local juiceStat = ui.stat(farmTab, { name = "MoonJuice on hand", value = util.juiceValue() })
 local farmStat = ui.stat(farmTab, { name = "Farm", value = "idle" })
 local converterStat = ui.stat(farmTab, { name = "Converters built", value = "..." })
+
+ui.section(farmTab, "Income")
+
+ui.toggle(farmTab, "AutoRewards", {
+	name = "Auto rewards",
+	description = "Claims playtime chests (event push) and any completed daily/weekly quest the moment they are ready. Free income that needs no player input.",
+	value = true,
+})
+
+local questStat = ui.stat(farmTab, { name = "Quests", value = "checking..." })
 
 -- ESP --------------------------------------------------------------------
 ui.section(espTab, "Overlays")
@@ -381,6 +398,10 @@ end)
 state.on("GunVolley", function()
 	combat.sync()
 end)
+
+state.on("AutoRewards", function()
+	rewards.sync()
+end)
 state.on("BlackScreen", function(value)
 	setBlackScreen(value == true)
 end)
@@ -414,6 +435,8 @@ farm.sync()
 esp.sync()
 travel.sync()
 combat.sync()
+rewards.sync()
+rewards.start()
 if state.get("NoRender") == nil then
 	state.set("NoRender", true)
 else
@@ -440,6 +463,9 @@ task.spawn(function()
 				local list = util.converters()
 				converterStat:Set(#list > 0 and table.concat(list, ", ") or "none built")
 			end
+			if questStat then
+				questStat:Set(rewards.stats())
+			end
 		end)
 		task.wait(2)
 	end
@@ -451,6 +477,7 @@ shutdown = function()
 	combat.stop()
 	esp.stop()
 	travel.stop()
+	rewards.stop()
 	util.stopAim()
 	if blackGui then
 		pcall(function()
@@ -481,6 +508,7 @@ if getgenv then
 		farm = farm,
 		combat = combat,
 		travel = travel,
+		rewards = rewards,
 	}
 end
 

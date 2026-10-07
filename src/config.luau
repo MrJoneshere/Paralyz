@@ -91,6 +91,23 @@ return {
 		-- Fly speed, studs per second is this times 60: 8 -> ~480 studs/s,
 		-- which crosses the 10k-stud gaps between planets in a usable time.
 		flySpeed = 8,
+		-- Hubs are folders of structures that stream with distance: from the
+		-- far side of the world their resolve() is nil even though they
+		-- exist (measured: Bunker folder present, zero BaseParts loaded at
+		-- 11k studs). These are their measured spawn-area coordinates, used
+		-- only as "go stand here until it loads" anchors - travel re-resolves
+		-- and re-lands after the wait, so stale coords never become landings.
+		hubFallbacks = {
+			Bunker = Vector3.new(725, 3033, -1332),
+			City = Vector3.new(654, 3063, -1230),
+		},
+	},
+
+	rewards = {
+		-- How often the daily/weekly quest list is polled for claims.
+		-- Playtime chests are push (event listener), so this only covers
+		-- quests -45s keeps Knit calls negligible.
+		pollDelay = 45,
 	},
 
 	perf = {

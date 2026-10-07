@@ -206,6 +206,39 @@ return function(deps)
 		return count
 	end
 
+	-- Ion juice: the anti-matter machine's input. Plain MoonJuice does NOT
+	-- match (measured: a verified hold at the converter consumed nothing
+	-- with5 plain stacks aboard - the machine is ion-only per its labels).
+	function util.ionJuiceCount(): number
+		local n = 0
+		for _, entry in ipairs(util.juiceTools()) do
+			if string.find(string.lower(entry.tool.Name), "ion", 1, true) then
+				n += 1
+			end
+		end
+		return n
+	end
+
+	-- The only conversion interface in the game: the SpaceStation's
+	-- "Insert Moonjuice" prompt (2.0s hold, 10 studs, line of sight).
+	-- Buildings phase in and out, so this resolves freshly every call.
+	function util.converterPrompt(): ProximityPrompt?
+		local planets = workspace:FindFirstChild("Planets")
+		if not planets then
+			return nil
+		end
+		for _, planet in ipairs(planets:GetChildren()) do
+			local station = planet:FindFirstChild("SpaceStation")
+			local machine = station and station:FindFirstChild("ConverterMachine")
+			local well = machine and machine:FindFirstChild("PartProximity")
+			local prompt = well and well:FindFirstChildWhichIsA("ProximityPrompt", true)
+			if prompt then
+				return prompt
+			end
+		end
+		return nil
+	end
+
 	-------------------------------------------------------------------- rocks
 	-- Rocks live in a folder called "Rocks" somewhere under each planet - on
 	-- some planets it is a direct child, on others it hangs off the planet's

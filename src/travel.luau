@@ -107,18 +107,36 @@ return function(deps)
 		end
 
 		local pos = entry.resolve()
+		-- blind = we are teleporting without a fresh resolve (remembered or
+		-- seeded coordinate): the destination then gets a load wait and a
+		-- verified re-landing, exactly like planets do.
+		local blind = false
 		if not pos then
 			-- Unloaded but visited this session: go to where it was and let
 			-- the load bring it back (checked again after the wait below).
 			local cached = known[entry.name]
 			if cached then
-				util.notify("Teleport", entry.name .. " is not loaded - going to its last position")
 				pos = cached
+				blind = true
+				util.notify("Teleport", entry.name .. " is not loaded - going to its last position")
 			end
 		end
 		if not pos then
-			-- The requested place is not in this world phase: fall back to a
-			-- sibling in the same group instead of failing outright.
+			-- Never visited this session but the hub has a measured spawn
+			-- anchor: standing on it streams the structure back in. Without
+			-- this, a hub request from across the world silently fell back
+			-- to a different hub (Bunker -> Venus City).
+			local seeded = config.travel.hubFallbacks[entry.name]
+			if seeded then
+				pos = seeded
+				blind = true
+				util.notify("Teleport", entry.name .. " is not loaded - going to its usual spot")
+			end
+		end
+		if not pos then
+			-- Genuinely not in this world phase: fall back to a sibling in
+			-- the same group instead of failing outright (fresh resolve, so
+			-- no confirm wait needed for the destination we end up at).
 			for _, alt in ipairs(travel.destinations) do
 				if alt.group == entry.group and alt.name ~= entry.name then
 					local altPos = alt.resolve()
@@ -148,16 +166,34 @@ return function(deps)
 		root.CFrame = CFrame.new(land)
 		util.teleported(root.CFrame)
 
-		-- Planets take a few seconds to stream in after you land: wait for
-		-- the load, re-resolve in case the real position differs from the
+		-- The destination may have been teleported to blind, or may be a
+		-- planet whose rocks stream in seconds after arrival: wait for the
+		-- load, re-resolve in case the real position differs from the
 		-- remembered one, and ALWAYS land on the fresh spot afterwards (the
 		-- old code skipped this when re-resolving failed, which is exactly
 		-- the "it loads but never takes me there" the user had to spam past).
-		if entry.group == "planet" then
-			local n = util.settleRocks(pos, config.farm.loadWait, config.farm.streamRadius)
-			local fresh = entry.resolve() or pos
+		if blind or entry.group == "planet" then
+			local n = 0
+			local fresh: Vector3? = nil
+			if entry.group == "planet" then
+				-- Planets prove their load with rocks.
+				n = util.settleRocks(pos, config.farm.loadWait, config.farm.streamRadius)
+				fresh = entry.resolve()
+			else
+				-- Hubs prove it by re-resolving: the folder is always
+				-- there, its structure parts only exist once streamed.
+				local deadline = os.clock() + config.farm.loadWait
+				while os.clock() < deadline do
+					fresh = entry.resolve()
+					if fresh then
+						break
+					end
+					task.wait(0.5)
+				end
+			end
+			fresh = fresh or pos
 			known[entry.name] = fresh
-			-- Re-fetch the root: the wait long enough for a respawn, and a
+			-- Re-fetch the root: the wait is long enough for a respawn, and a
 			-- stale BasePart reference silently does nothing.
 			local landed = false
 			for _ = 1, 4 do
@@ -178,10 +214,14 @@ return function(deps)
 			local suffix
 			if not landed then
 				suffix = " - load wait ended but the landing would not stick"
-			elseif n > 0 then
+			elseif entry.group == "planet" and n > 0 then
 				suffix = " - loaded, " .. n .. " rocks"
-			else
+			elseif entry.group == "planet" then
 				suffix = " - still empty after waiting"
+			elseif entry.resolve() then
+				suffix = " - loaded"
+			else
+				suffix = " - did not load, it may not exist in this phase"
 			end
 			util.notify("Teleport", entry.name .. suffix)
 		else
