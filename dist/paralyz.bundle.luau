@@ -937,6 +937,15 @@ return function(deps)
 		return state.enabled("HideMining")
 	end
 
+	-- Conversion pays for ion (2.5 credits/swing vs the Moon's 1.25); raw
+	-- ion sells at 20/stack = 0.67/swing, BELOW the Moon, so the ion
+	-- preference (planet ranking + the start-of-run probe) only applies
+	-- when the converter will actually run.
+	local function preferActive(): boolean
+		local prefer = config.farm.preferPlanets
+		return prefer ~= nil and next(prefer) ~= nil and state.enabled("AutoConvert")
+	end
+
 	-- CFrame to hold while swinging this rock, never farther from the centre
 	-- than config.farm.maxRange (the server drops swings past that).
 	local function stanceCFrame(rock: BasePart, fromPos: Vector3): CFrame
@@ -1120,6 +1129,7 @@ return function(deps)
 				planetCool[p.name] = now + config.farm.planetCooldown
 			end
 		end
+		local prefer = if preferActive() then config.farm.preferPlanets else nil
 		table.sort(scan, function(a, b)
 			-- Live rock counts first (meaningful only for planets already
 			-- streamed in), then nearest: probing the closest unknown planet
@@ -1131,7 +1141,6 @@ return function(deps)
 			if (a.rocks > 0) ~= (b.rocks > 0) then
 				return a.rocks > 0
 			end
-			local prefer = config.farm.preferPlanets
 			if prefer then
 				local pa = prefer[a.name] == true
 				local pb = prefer[b.name] == true
@@ -1273,6 +1282,7 @@ return function(deps)
 		externalUntil = 0
 		local stall = 0 -- swings since the last juice
 		local fixStage = 0
+		local probedPreferred = false -- one best-income probe per run
 		local emptyWaits = 0
 		local aimFails = 0
 		local lastJuice = util.juiceCount()
@@ -1334,6 +1344,52 @@ return function(deps)
 			if not root then
 				task.wait(0.5)
 				continue
+			end
+
+			-- One-shot at run start: leave a local vein that pays worse to
+			-- verify the ion field. Local rocks only prove THIS planet has
+			-- work; they say nothing about the best planet, and a run
+			-- started from a stranded position (Mars 0.88/swing, Moon 1.25,
+			-- ion 2.5) would otherwise mine the worst planet forever,
+			-- because local rocks never trigger rotation. Probes only when
+			-- there is local work to leave - a run starting with nothing
+			-- loaded reaches the same probe through the normal rotation.
+			if not probedPreferred and preferActive() then
+				probedPreferred = true
+				local prefer = config.farm.preferPlanets
+				local preferred
+				for _, p in ipairs(util.planetScan()) do
+					if prefer[p.name] then
+						preferred = p
+						break
+					end
+				end
+				if preferred
+					and util.dist(preferred.centre, root.Position) > config.farm.streamRadius
+					and #util.rocksNear(root.Position, config.farm.streamRadius) > 0
+				then
+					report(
+						"checking " .. preferred.name .. " (best income) before settling here",
+						true
+					)
+					rotateTeleport(CFrame.new(util.dropToSurface(preferred.centre)))
+					setPhase("loading " .. preferred.name)
+					task.wait(1)
+					local n = util.settleRocks(
+						preferred.centre,
+						config.farm.loadWait,
+						config.farm.streamRadius
+					)
+					if n > 0 then
+						rotateTeleport(CFrame.new(util.dropToSurface(preferred.centre)))
+						setPhase("loaded " .. preferred.name)
+						report(preferred.name .. " has " .. n .. " rocks - mining the ion field", true)
+					else
+						planetCool[preferred.name] = os.clock() + config.farm.planetCooldown
+						report(preferred.name .. " is empty right now - staying local", true)
+					end
+					continue
+				end
 			end
 
 			local rock = pickRock(root.Position)
