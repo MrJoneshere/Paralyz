@@ -234,9 +234,16 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
   anti-matter tools (they carry `Credits`).
 - **MoonJuiceTank pickups** (`Workspace.Unanchored`, attr `MoonJuiceTank=true`, ~35 lying around,
   kids = LocalScript + Beam + Attachment + `Credits` NumberValue): their LocalScript equips a
-  Beam to `Workspace.City.Nuke.Frame.Refuel.Attachment` - tanks fuel the Nuke. Standing on one
-  for 5s does NOT collect it (no pickup trigger found client-side: no prompt, no ClickDetector);
-  collection mechanism still unknown. `Values.Fuel` read 65 and did not move.
+  Beam to `Workspace.City.Nuke.Frame.Refuel.Attachment` - tanks fuel the Nuke. **They carry NO
+  Handle**, so vanilla touch-pickup is structurally impossible; standing on one does nothing,
+  no ProximityPrompt exists even at close range, and no pickup remote exists in `Events`.
+  A client-side `Parent` change would only be a local illusion (the sell remote counts the
+  server's backpack). Working conclusion: tanks are consumed by the Nuke/server, not
+  player-collectible income. `Values.Fuel` read 65 and did not move.
+- `ReplicatedStorage.Values` holds the per-planet pools and story flags in one place:
+  `MoonJuice` (global), `MoonJuiceMars`, `MoonJuiceVenus`, `Laser`/`Laser2`/`Laser3` (0),
+  `Sun` (false), `BossCooldown` (0), `Fuel` (65) - **ion buildings gate on `MoonJuiceVenus`,
+  not the global pool** (buying against the global pool gets refused silently).
 
 
 ## Quests & playtime
