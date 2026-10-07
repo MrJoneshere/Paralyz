@@ -174,6 +174,20 @@ return function(deps)
 
 			local tool = util.equippedTool()
 			local kind = gunKind(tool)
+			-- This game re-parents the pickaxe into the character alongside
+			-- other tools, so "first tool child" misses the hex. The hex's
+			-- own env flag (ToolEquipped, set by its Equipped/Unequipped
+			-- handlers) is the ground truth for whether it is active - use
+			-- it when the naive lookup does not find a gun.
+			if not kind then
+				local hexTool = util.character():FindFirstChild("HexSpitter")
+				if hexTool then
+					local env = hexEnv(hexTool :: Tool)
+					if env and env.ToolEquipped == true then
+						tool, kind = hexTool :: Tool, "hex"
+					end
+				end
+			end
 			if not kind or not tool then
 				task.wait(0.3)
 				continue
@@ -189,7 +203,9 @@ return function(deps)
 				local env = hexEnv(tool :: Tool)
 				if env then
 					local active = env.MouseDown == true and (tool :: Tool).Enabled == false
-					if rapid and not active then
+					-- ToolEquipped is the fire loop's own gate: without it,
+					-- spawning would churn (the loop would exit instantly).
+					if rapid and not active and env.ToolEquipped == true then
 						env.MouseDown = true
 						task.spawn(env.StartFiring)
 						hexStartedEnv = env
