@@ -85,6 +85,13 @@ Consequences the code respects:
   `MoonJuice=993, MoonJuiceMars=264, MoonJuiceVenus=400`.
 - Buildings are bought with `Events.Buy:FireServer(name, "Building", cost, planet)` — spending
   per-planet currencies (MoonJuice/Mars/Venus).
+- **Pool refills follow the `Values.Fuel` cycle** (measured via a 25-min watch, 2026-10-07):
+  Fuel regenerates `0 → 100` over ~20 min (tanks refuel the Nuke, see below), then drops to 0 in
+  a single tick together with a global-pool collapse (`MoonJuice 545 → 3` — the Nuke firing;
+  the Io arrival earlier showed the same `Fuel 75 → -inf → 0` signature). **All pools refill while
+  Fuel climbs** (`MoonJuiceMars 0 → 349`, `MoonJuiceVenus 0 → ~400` in one cycle); during Fuel=0
+  stretches pools sit still or creep (global ~0.2/s, Venus ~1/s after recovery). So a pool stuck
+  at 0 is *phase-gated*, not dead — watch Fuel before concluding a planet is unbuyable.
 
 ## Weapons (Rail Gun / RocketLauncher)
 
@@ -253,13 +260,15 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
 - **Mars (Planet4) experiment (2026-10-07):** rocks are `MarsRocks`, they drop **plain
   `MoonJuice=15`** (no ion), yield ~17 swings/stack → **~0.88 credits/swing - worse than the
   Moon (12 swings, 1.25) and far worse than Venus ion (30 swings, 2.5)**. Selling Mars-mined
-  juice fills **no pool** (mars=0 global=0 after 4 verified sells) - consistent with the
-  pump-fed-only measurement. Mars's `MoonJuiceMars` sits at 0 with **no pump-type Mars building
-  in the buy map** (PlutoColony 300 / Expanded 500 / Main 700 / Phobos 500 / MarsDomes 400 /
-  TerraformPluto 800 / Terraform 1000 - all gated on a pool that never refills), so **Mars
-  buildings are blocked until a refill source appears** (another player, or a pump we have not
-  found). Do not re-stage Mars buys blindly - wait for `MoonJuiceMars > 0` first. Farm
-  economics ranking: **Venus ion (2.5/swing, needs AutoConvert) > Moon (1.25) > Mars (0.88)**.
+  juice fills **no pool** (mars=0 global=0 after 4 verified sells). `MoonJuiceMars` looked dead
+  (0 for 30+ min) but **refills with the Fuel cycle** (Currencies section) — it hit 349 in one
+  Fuel climb. MarsController buy map (exact args, all `("Mars")` 4th arg): `PlutoColony` 300 /
+  `MarsDomes` 400 (gate: `workspace.MarsCity` exists, no `MarsCity.MarsDomes`) / `Phobos` 500
+  (gate: no `workspace.ProjectPhobos`) / `ExpandedPlutoColony` 500 / `MainColony` 700 /
+  `TerraformPluto` 800 / `Terraform` 1000 (gate: `Planet4…Terraformed.Transparency ~= 0`, i.e.
+  buyable exactly once) — the Mars menu also sells `HexSpitter` for 10 and `PurpleSaber` for 20
+  from this pool. Farm economics ranking: **Venus ion (2.5/swing, needs AutoConvert) > Moon
+  (1.25) > Mars (0.88)**.
 - **MoonJuiceTank pickups** (`Workspace.Unanchored`, attr `MoonJuiceTank=true`, ~35 lying around,
   kids = LocalScript + Beam + Attachment + `Credits` NumberValue): their LocalScript equips a
   Beam to `Workspace.City.Nuke.Frame.Refuel.Attachment` - tanks fuel the Nuke. **They carry NO
@@ -346,6 +355,13 @@ you. Monsters themselves are `Moonfected` models under `Workspace.Unanchored.Sma
 - All 6 planets sit in `workspace.Planets` even from spawn, but their **rocks** only exist within
   streaming range of a player — scanning rock counts from afar tells you nothing about emptiness.
   Planet2/Planet5 coordinates also differ between sessions: never hardcode planet positions.
+- **Rayfield Gen2 `Statistic:Set()` only accepts numbers** (`assert(typeof(k)=='number')`) — a
+  string stat throws every update; with the old shared pcall one throw silently froze *every*
+  later stat at its initial value (Farm showed "idle", Quests "checking…" forever). Words go on
+  `tab:CreateText({ name, text })` cards via the `ui.text` wrapper (`Text:Set` takes any value);
+  `ui.stat` is numbers-only. Each updater now has its own pcall and each unique error is logged
+  exactly once (`[Paralyz] live stats - …`). The window lives at
+  `CoreGui.RobloxGui.<guid>.Paralyz`, not under a "Rayfield" name — search by `Name == "Paralyz"`.
 
 ## Executor gotchas hit here
 
