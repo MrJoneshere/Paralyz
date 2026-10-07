@@ -116,6 +116,9 @@ return {
 		-- Playtime chests are push (event listener), so this only covers
 		-- quests -45s keeps Knit calls negligible.
 		pollDelay = 45,
+		-- A quest pass that takes longer than this is treated as a wedged
+		-- RemoteFunction and abandoned (one zombie thread, never more).
+		passTimeout = 15,
 	},
 
 	perf = {

@@ -155,12 +155,44 @@ return function(deps)
 	end
 
 	----------------------------------------------------------------- loop
+	-- A RemoteFunction that never returns would freeze this loop inside
+	-- pcall forever - pcall catches errors, not hangs, and this game has
+	-- proven RFs can wedge (see NOTES: ServerControl). So each pass runs
+	-- in its own thread with a completion flag: a pass that does not come
+	-- back within config.rewards.passTimeout is abandoned (one zombie
+	-- thread, never more) and the loop keeps ticking. A merely-slow pass
+	-- self-heals: when it finally returns, it clears the flag and the
+	-- normal cadence resumes.
+	local passPending = false
+	local hangNotified = false
+
 	local function pollLoop()
 		while running do
 			if state.enabled("AutoRewards") then
-				pcall(function()
-					rewards.claimReady()
-				end)
+				if passPending then
+					if not hangNotified then
+						hangNotified = true
+						util.notify(
+							"Rewards",
+							"quest pass stopped answering - pausing quest claims (playtime chests still auto-claim)"
+						)
+					end
+				else
+					passPending = true
+					task.spawn(function()
+						pcall(function()
+							rewards.claimReady()
+						end)
+						passPending = false
+						hangNotified = false
+					end)
+					-- Give a healthy pass time to finish in-place so stats
+					-- refresh promptly; timeout just moves on to the wait.
+					local t0 = os.clock()
+					while passPending and os.clock() - t0 < config.rewards.passTimeout do
+						task.wait(0.25)
+					end
+				end
 			end
 			task.wait(config.rewards.pollDelay)
 		end
