@@ -101,7 +101,7 @@ Consequences the code respects:
 - **A round restart wipes everything economy-side** (measured on the restart the watcher caught,
   2026-10-07): every `Values.*` pool → 0, `Fuel` → 0, and all bought buildings gone (SpaceStation,
   VenusCity, pumps, colonies) — only `City, SpawnLocation, FriendIndustries` stood afterwards.
-  Round length is **not** constant: one round ended at `ClientSeconds=2854`, the next at `3527`.
+  Round length is **not** constant: restarts were measured at `ClientSeconds` 2854, 3527 and 2211.
 - Fuel was seen climbing past the old 100 mark (`110, 130, 150` after that restart) — treat 100 as
   "Nuke ready", not a hard cap.
 
@@ -302,15 +302,20 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
   the backpack can never clog; and when the round is about to end **everything** is dumped via
   `sellAll()` regardless of tier. The farm tab shows the tier/machine/round state on the
   "Sell policy" card.
-- **Round-end dump signals (measured on the 2026-10-07 restart):** the round hard-restarts with
-  no warning UI - `PlayerGui.Fim` ("The End") **never enabled** in the measured round (watcher
-  polled it every 10s through the reset), and the clock length varies (2854 / 3527), so neither
-  can be the primary trigger. What fires reliably before the reset is the final `Events.Text`
-  chain: `HUMANITY IS EXTINCT ... MARS IMPACT` (~50s out) → `THE DYSON SPHERE GOT DESTROYED!`
-  (~20s) → `THE SUN IS MOVING! BUILD MERCURY COLONY ...` (~10s) → reset. `util.roundEndSoon()`
-  listens on `Events.Text` for the last two markers, clears itself when `ClientSeconds` rewinds
-  (that is the new round), and the farm dumps the whole backpack on it. `config.farm.roundLength`
-  stays 0 (clock threshold disabled) until the length proves constant.
+- **Round-end dump signals (measured on TWO restarts, 2026-10-07):** the round hard-restarts with
+  no warning UI, the clock length varies wildly (`2854` / `3527` / `2211` - `config.farm.roundLength`
+  stays 0), and **the final story chain differs per round**:
+  - round A: `HUMANITY IS EXTINCT ... MARS IMPACT` (~50s out) → `THE DYSON SPHERE GOT DESTROYED!`
+    (~20s) → `THE SUN IS MOVING! BUILD MERCURY COLONY ...` (~10s) → reset. `PlayerGui.Fim` was
+    never caught enabling.
+  - round B: `MAIN BUNKER DESTROYED` → `EARTH IS NOW A LAVA PLANET` → `JUPITER IS GOING TO
+    COLLIDE ...` (~2 min out) → **`Fim.Enabled = true`** → reset (Fim visible for 10-41s). No
+    Dyson/Sun messages at all - and Fim also flashed ON for ~10s at 29m mid-round, so Fim is
+    late-but-not-unique; an early dump on the flash costs only conversion value, a missed dump
+    costs the whole stack, so Fim is accepted as an immediate trigger.
+  - `util.roundEndSoon()` therefore layers: Text markers (event-driven, covers round-A ends) +
+    `Fim.Enabled` (checked every farm pass ~1-2s, far finer than any watcher, covers the rest) +
+    the disabled clock threshold. It self-clears when `ClientSeconds` rewinds (new round).
 - **MoonJuiceTank pickups** (`Workspace.Unanchored`, attr `MoonJuiceTank=true`, ~35 lying around,
   kids = LocalScript + Beam + Attachment + `Credits` NumberValue): their LocalScript equips a
   Beam to `Workspace.City.Nuke.Frame.Refuel.Attachment` - tanks fuel the Nuke. **They carry NO
