@@ -258,9 +258,21 @@ return function(deps)
 		table.sort(scan, function(a, b)
 			-- Live rock counts first (meaningful only for planets already
 			-- streamed in), then nearest: probing the closest unknown planet
-			-- beats hopping to the far edge of the map.
+			-- beats hopping to the far edge of the map. Within the same
+			-- rocks-tier, preferred planets (config.farm.preferPlanets -
+			-- the ion field) win, and when every planet reads empty the
+			-- first probe goes there, because that is where the best
+			-- income is once content appears.
 			if (a.rocks > 0) ~= (b.rocks > 0) then
 				return a.rocks > 0
+			end
+			local prefer = config.farm.preferPlanets
+			if prefer then
+				local pa = prefer[a.name] == true
+				local pb = prefer[b.name] == true
+				if pa ~= pb then
+					return pa
+				end
 			end
 			return util.dist(a.centre, root.Position) < util.dist(b.centre, root.Position)
 		end)

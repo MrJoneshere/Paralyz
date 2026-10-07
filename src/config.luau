@@ -54,6 +54,12 @@ return {
 		-- A planet that loaded empty goes on "not right now" for this long.
 		-- Never forever: content appears later as phases advance.
 		planetCooldown = 45,
+		-- Rotation preference: Planet5 drops ion juice, worth ~2x plain
+		-- Moon juice once converted (74 vs 15 per stack). rotatePlanet
+		-- ranks preferred planets first within the same has-rocks tier,
+		-- and probes them first when every planet looks empty. Data, not
+		-- logic: add a name here to bias the farm toward it.
+		preferPlanets = { Planet5 = true },
 		-- Every planet in the world probed and found empty: pause this long
 		-- before starting another sweep instead of bouncing map-edge to
 		-- map-edge.
