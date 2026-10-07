@@ -263,11 +263,11 @@ ui.section(combatTab, "Gun mods")
 
 ui.toggle(combatTab, "GunRapid", {
 	name = "No cooldown",
-	description = "Refires the equipped Rail Gun / Rocket as fast as the server answers, skipping the client-side waits. You aim - the mod only removes the rate limit.",
+	description = "Rail/Rocket refire as fast as the server answers. Moon Gun (HexSpitter): keeps its own fire loop running, perfect accuracy, damage pinned to max. You aim - the mod never moves your camera.",
 })
 ui.toggle(combatTab, "GunVolley", {
 	name = "Volley",
-	description = "Every rail shot sprays every monster in range instead of one. Server damage math is not client-writable, so this is the honest bigger-hitbox.",
+	description = "Every rail shot sprays every monster in range; the Moon Gun switches to multi-pellet bursts. Bigger hitbox client-side - what the server kills is its call.",
 })
 
 -- Settings ---------------------------------------------------------------

@@ -31,6 +31,20 @@ local PARALYZ_MODULES = {
 --   RocketLauncher  the client side is just MouseLoc.OnClientInvoke
 --                   returning Mouse.Hit.p - the server pulls the aim when
 --                   it fires - plus Tool.Enabled mirroring a server gate.
+--   HexSpitter      "Moon Gun" (Events.Buy, 10 juice). Its LocalScript owns
+--                   a while-MouseDown fire loop whose upvalues are env
+--                   globals (getsenv): StartFiring / StopFiring /
+--                   MouseDown. The loop reads Configuration client-side
+--                   (FireRate, Accuracy, Burst.Bullets, Damage), so pinning
+--                   those and keeping the loop alive is a real mod.
+--
+-- Honest damage verdict (measured 2026-10-07, see NOTES.md): NO player
+-- weapon awards damage on moon monsters for a normal account - rail all
+-- variants, HexSpitter loop fire with verified on-target aim, sword at
+-- contact range, synthetic RayHit payloads: all zero. These mods are
+-- exactly what a client can own: rate, gates, pellets, volley spread.
+-- Damage that lands is the server's call (ships/other content may honor
+-- it; monsters so far do not).
 
 return function(deps)
 	local config = deps.config
@@ -78,8 +92,15 @@ return function(deps)
 	-- GunVolley: every rail trigger additionally sends a shot at every
 	-- monster in gunRange. Server damage math is not client-writable, so
 	-- this is the honest "bigger hitbox": one trigger, the whole crowd.
+	-- HexSpitter: GunRapid pins the values its own loop reads (FireRate,
+	-- Accuracy, best-effort Damage) and keeps the while-MouseDown loop
+	-- alive through getsenv; GunVolley raises Burst.Bullets for multi-
+	-- pellet triggers. The loop is started/stopped only by us when we
+	-- started it, so a manual hold is never released underneath the user.
 	local modRunning = false
 	local nextFire = 0
+	local nextPin = 0
+	local hexStartedEnv: { [string]: any }? = nil
 
 	local function gunKind(tool: Tool?): string?
 		if not tool then
@@ -92,7 +113,59 @@ return function(deps)
 		if string.find(low, "rocket", 1, true) then
 			return "rocket"
 		end
+		if string.find(low, "spitter", 1, true) or string.find(low, "hex", 1, true) then
+			return "hex"
+		end
 		return nil
+	end
+
+	-- The HexSpitter LocalScript keeps its loop control as env globals
+	-- (old-style script declarations): StartFiring, StopFiring, MouseDown,
+	-- ToolEquipped, Reloading. getsenv reaches them; nothing here needs
+	-- focus or any input synthesis (VIM input is flagged gameProcessed and
+	-- the tool's handler skips it - measured).
+	local function hexEnv(tool: Tool): { [string]: any }?
+		local ls = (tool :: Tool):FindFirstChild("LocalScript")
+		if not ls then
+			return nil
+		end
+		local ok, env = pcall(getsenv, ls :: Instance)
+		if ok and type(env) == "table" and type((env :: any).StartFiring) == "function" then
+			return env :: any
+		end
+		return nil
+	end
+
+	local function hexPins(tool: Tool, rapid: boolean, volley: boolean)
+		local cfg = (tool :: Tool):FindFirstChild("Configuration")
+		if not cfg then
+			return
+		end
+		pcall(function()
+			local fr = cfg:FindFirstChild("FireRate")
+			if fr and (fr :: any).Value > config.combat.hexFireRate then
+				(fr :: any).Value = config.combat.hexFireRate
+			end
+			if rapid then
+				local acc = cfg:FindFirstChild("Accuracy")
+				if acc then
+					(acc :: any).Value = Vector3.zero
+				end
+			end
+			if volley then
+				local burst = cfg:FindFirstChild("Burst")
+				local bullets = burst and burst:FindFirstChild("Bullets")
+				if bullets and (bullets :: any).MaxValue < config.combat.hexPellets then
+					(bullets :: any).MaxValue = config.combat.hexPellets
+				end
+			end
+			-- Best-effort: the value is a DoubleConstrainedValue (max 17).
+			-- Server may re-replicate the stock 15 over it; harmless either way.
+			local dmg = cfg:FindFirstChild("Damage")
+			if dmg and (dmg :: any).Value < (dmg :: any).MaxValue then
+				(dmg :: any).Value = (dmg :: any).MaxValue
+			end
+		end)
 	end
 
 	local function modLoop()
@@ -100,6 +173,12 @@ return function(deps)
 			local rapid = state.enabled("GunRapid")
 			local volley = state.enabled("GunVolley")
 			if not rapid and not volley then
+				if hexStartedEnv then
+					pcall(function()
+						(hexStartedEnv :: any).MouseDown = false
+					end)
+					hexStartedEnv = nil
+				end
 				task.wait(0.25)
 				continue
 			end
@@ -112,6 +191,31 @@ return function(deps)
 			local kind = gunKind(tool)
 			if not kind or not tool then
 				task.wait(0.3)
+				continue
+			end
+
+			if kind == "hex" then
+				-- Re-pin the values the fire loop reads about once a second
+				-- (server replication can roll them back).
+				if os.clock() >= nextPin then
+					nextPin = os.clock() + 1
+					hexPins(tool :: Tool, rapid, volley)
+				end
+				local env = hexEnv(tool :: Tool)
+				if env then
+					local active = env.MouseDown == true and (tool :: Tool).Enabled == false
+					if rapid and not active then
+						env.MouseDown = true
+						task.spawn(env.StartFiring)
+						hexStartedEnv = env
+					elseif not rapid and hexStartedEnv == env and env.MouseDown then
+						-- Only release the loop we started; a manual hold
+						-- (input-driven MouseDown) is left alone.
+						env.MouseDown = false
+						hexStartedEnv = nil
+					end
+				end
+				task.wait(0.2)
 				continue
 			end
 
@@ -163,6 +267,12 @@ return function(deps)
 
 	function combat.stopGuns()
 		modRunning = false
+		if hexStartedEnv then
+			pcall(function()
+				(hexStartedEnv :: any).MouseDown = false
+			end)
+			hexStartedEnv = nil
+		end
 	end
 
 	function combat.sync()
@@ -270,6 +380,14 @@ return {
 		-- and damage math are not writable from here.
 		gunDelay = 0.4,
 		gunRange = 800,
+		-- HexSpitter ("Moon Gun"): its LocalScript fire loop reads these
+		-- Configuration values client-side, so pinning them has real effect.
+		-- FireRate = seconds between bursts (stock 0.06); the loop is bound
+		-- by remote round-trips anyway, so this is a feel knob, not a kick
+		-- risk. hexPellets raises Burst.Bullets.MaxValue: more pellets per
+		-- trigger at a slower cycle (true volley semantics).
+		hexFireRate = 0.02,
+		hexPellets = 8,
 	},
 
 	travel = {
@@ -3092,11 +3210,11 @@ ui.section(combatTab, "Gun mods")
 
 ui.toggle(combatTab, "GunRapid", {
 	name = "No cooldown",
-	description = "Refires the equipped Rail Gun / Rocket as fast as the server answers, skipping the client-side waits. You aim - the mod only removes the rate limit.",
+	description = "Rail/Rocket refire as fast as the server answers. Moon Gun (HexSpitter): keeps its own fire loop running, perfect accuracy, damage pinned to max. You aim - the mod never moves your camera.",
 })
 ui.toggle(combatTab, "GunVolley", {
 	name = "Volley",
-	description = "Every rail shot sprays every monster in range instead of one. Server damage math is not client-writable, so this is the honest bigger-hitbox.",
+	description = "Every rail shot sprays every monster in range; the Moon Gun switches to multi-pellet bursts. Bigger hitbox client-side - what the server kills is its call.",
 })
 
 -- Settings ---------------------------------------------------------------

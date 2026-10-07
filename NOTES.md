@@ -99,14 +99,53 @@ Both ship in the Backpack as Tools; the client halves are tiny:
   cooldown. Tool children include server `Script`s (`Server`, `Rocket`) — server RunContext, so the
   decompiler refuses them ("Expected a Script with RunContext set to Client") and so does
   `getscriptbytecode`. Firing trigger = `tool:Activate()`.
-- Unproven hypothesis (2026-10-07, target died before the aimed shot landed): the rail server
-  re-derives the shot from the shooter's **mouse ray**, because raw `Click:FireServer(pivot)` did
-  no damage at 27 studs with and without a camera aim that left `mouse.Target` 8 studs off the
-  monster. The decisive test is: bind camera until `mouse.Target` is *inside the monster model*,
-  fire with the exact `mouse.Hit.Position`, watch Health per 0.35s shot.
+- **RESOLVED 2026-10-07: the rail does zero damage to monsters, every way.** A 480s job caught 10
+  rigs and fired 4 variants per rig (`remote-only`, `tool:Activate()+remote`,
+  `activate+remote-delayed`, `activate+exactPivot`) with `mouse.Target` sometimes sitting exactly
+  on the rig's own mesh (`Retopo_Cube.004`) — all 40 shots: 700>700. Same for markers with every
+  aim point tried. There is no missing activation ingredient; the server simply does not award
+  monster damage to normal (uninfected) accounts from `Click`.
+- **HexSpitter ("Moon Gun") — full anatomy (bought 10 MoonJuice via
+  `Events.Buy:FireServer("HexSpitter","Tool",10)`):** `Configuration` holds `Damage` (a
+  `DoubleConstrainedValue`, current 15, min 7 max 17), `FireRate=0.06`, `Automatic=true`,
+  `Range=100000`, `Accuracy=(0.5,0.5,0.5)` (client-side spread the fire loop multiplies in),
+  `Ammo.Magazines` (10,000,000, server replicates it back so client decrements don't stick).
+  Fire protocol lives in its `LocalScript`: input (`UserInputService.InputBegan` MouseButton1/
+  Touch/ButtonR2, **requires `gameProcessedEvent == false`**) → `StartFiring` loop →
+  `ServerControl:InvokeServer("Fire", true)` then per bullet `CastLaser` + `RayHit` with a
+  client raycast payload `{Hit, Position, Target, Humanoid, Character}` (plus server pulls
+  `ClientControl:InvokeClient("MousePosition")`). **Measured verdict: even with camera-locked
+  aim where `mouse.Target` is the rig's mesh and `GetTargetPosition()` lands 2 studs from the
+  pivot, 7–8s of loop fire does 700→700 — the server awards HexSpitter no monster damage either.**
+  Its range (100k) and 0.06 fire rate suggest it is a spaceship/space weapon, not a monster one.
 - Shipped gun mods (`combat.luau`) are client-rate only: `GunRapid` refires at `gunDelay` and
   clears the rocket's client `Enabled` gate; `GunVolley` sprays the rail remote at every monster
   in `gunRange`. Server damage math is not client-writable.
+
+### Firing a tool's own LocalScript loop without input (executor tricks, all measured)
+
+- `getsenv(tool.LocalScript)` exposes the script env: `StartFiring`, `StopFiring`, `MouseDown`,
+  `ToolEquipped`, `Reloading`, `GetTargetPosition` are **globals in that table**. Firing =
+  `se.MouseDown = true; task.spawn(se.StartFiring)`; stop = `se.MouseDown = false`. This bypasses
+  the input layer entirely (background-safe, no focus needed) and was verified live: `Tool.Enabled`
+  flips false, the loop completes server round-trips (~32 invokes/s: Fire+CastLaser+RayHit per
+  shot, no server throttle observed).
+- **VirtualInputManager exists** (`game:GetService("VirtualInputManager")`) and
+  `SendMouseButtonEvent(960,540,0,true,game,0)` does reach `UserInputService.InputBegan` — but
+  always with `gameProcessedEvent=true`, so the HexSpitter handler (`if not a2`) skips it. VIM
+  touch/gamepad variants delivered nothing. Real's `send-input` (OS-level) works only while the
+  Roblox window is focused (Win32 `SetForegroundWindow` on the process handles it) and did not
+  reach `InputBegan` at all in the unfocused state. `firesignal` is a no-op in Real (per
+  `click-button` docs), so GUI-signal clicks do nothing.
+- **`ServerControl:InvokeServer` can wedge**: after a `tool:Activate()` + stray invokes, every
+  later invoke on that RemoteFunction hung forever (even `CastLaser`), while RemoteEvents kept
+  working — recover by **rejoining** (launch `%LOCALAPPDATA%\Roblox\Versions\version-02c37bc51a384b8f\RobloxPlayerBeta.exe "roblox://experiences/start?placeId=133579701570149"`; the bare
+  `roblox://` protocol Start-Process fails in a non-interactive shell, pass it as the exe argument).
+  From a clean client the legit loop never wedges.
+- `record-session` does **not** see RemoteFunction `InvokeServer` calls (only RemoteEvents), and
+  `spy-closure` on env functions gives working **call counters** but an empty log for these
+  (entries/logged stay 0); its `stop` sometimes refuses to unhook ("still reports as hooked").
+  Counters still prove whether a loop ran.
 
 ## Monsters & combat (measured 2026-10-07)
 
@@ -128,17 +167,41 @@ Two different "monsters" exist and they behave completely differently:
   shot, but a LATER battery with `mouse.Target` sitting exactly on the rig's own mesh and the
   remote fired did zero damage, so that kill was almost certainly another player (the spawn area
   is busy) or a missing ingredient.
-- **Open question being tested**: whether the rail needs a real `Tool.Activated` alongside
-  `Click:FireServer` (the pickaxe's server rule is exactly that: real activation + valid
-  `mouse.Target`). Batteries so far fired the remote ONLY, which may be why they did nothing.
+- **RESOLVED 2026-10-07 (later battery): `tool:Activate() + Click:FireServer` is NOT the missing
+  ingredient.** 10 rigs × 4 fire variants (incl. real activation, delayed activation, exact-pivot
+  aim, `mouse.Target` on the mesh) = zero damage across the board.
+- **Complete normal-player damage battery = ZERO everywhere** (all measured 2026-10-07): rail all
+  variants; HexSpitter legit loop fire with camera-locked verified aim (rigs, `Tool.Enabled=false`
+  proves the loop ran); HexSpitter synthetic `RayHit` payloads with `Hit`/`Humanoid`/`Character`
+  filled and aim points on the pivot and 3 studs above the floor (markers — invokes return `ok`,
+  no error, no damage); Super Sword swings at 8–11 studs (markers), 3 studs (550hp rig-puppet),
+  and **1.5 studs from a true zero-part marker (10× swings, 100→100)**; `Events.MoonMonster.Attack`
+  (server-gated on attr `MoonMonsterPlayer`). HP attrition observed on rigs (700→550, 700→500)
+  comes from other players/events — the spawn area is busy — never from our tested paths. Either
+  the infected-attack path or something outside every client-facing surface awards damage.
+- **Two marker families confirmed by anatomy:**
+  `Unanchored.SmallMoonMonsters/Moonfected` (100 or 70 hp) = `Humanoid` + `Script:AI` +
+  `Script:HitDetector` + **zero BaseParts** (server scripts, unreadable client-side);
+  `Unanchored.MoonMonsters/MoonMonster` (500–700 hp) = an animated puppet with `HumanoidRootPart`
+  + mesh `Retopo_Cube.004` + `InitialPoses` + `AnimSaves` (hp varies per spawn — 550 and 500 seen
+  fresh-ish, so attrition or spawn variance, not only "700"). `nearestMonster` returns either
+  family; discriminate by checking `FindFirstChildWhichIsA("BasePart").Name`.
 - Monster-player combat (infection gamepass 1548419084 → `Events.Infected:FireServer(btn)`):
   while your character has attr `MoonMonsterPlayer`, `MoonMonsterPlayerControls` fires
   `Events.MoonMonster.Attack:FireServer(camera.LookVector)` on click/F/R2 with a 0.65s client
-  gate - direction-based, no parts needed.
+  gate - direction-based, no parts needed. **This is the only damage path anyone has been
+  observed to make stick on markers (`LastHitPlayer` attr).**
 - Gun client facts: rail = `tool.Click:FireServer(mouse.Hit.p)` (5s wait is icon-only), rocket =
   server pulls `MouseLoc` + `Tool.Enabled` gate. `Events.GetMouse` is a server→client ask that
   `PickaxeController` answers with `FireServer(LocalPlayer, mouse.Target)` - the server periodically
   reads our mouse target, which is why camera aim matters for mining.
+- **Tool shop facts**: FriendIndustries buttons are plain `GuiButton`s handled client-side in
+  `EarthController`/`MarsController`/`VenusController` (`MouseButton1Click` → `Events.Buy`).
+  "Moon Gun" → `HexSpitter` (10), "Moon Saber" → `PurpleSaber` (20); other buttons buy buildings
+  (costs read from their labels: MoonPumper 200, SpaceStation 500, Nuke 200, ForceField 500,
+  RecoverEarth 1200, ColossalEngines 2000, …). The server **refuses a re-buy while the ownership
+  flag persists across rejoin**, but the physical tool does not always respawn with you; delivery
+  after an accepted buy can take 5+ seconds (poll, don't assume instant).
 
 ## Converters / anti-matter economy
 
@@ -182,6 +245,9 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
   `ClaimQuest("Daily"|"Weekly", id)` is safe to call.
 - Playtime rewards: listen for `Events.PlaytimeReward` with `Action == "Ready"`, then
   `Events.PlaytimeClaim:FireServer()` — 1800s cycle.
+- `ReplicatedStorage.RewardsConfig` (requireable module) = the playtime chest table: chest 1 pays
+  Credits 30–200 (weight 50), chest 2 pays MoonJuice tool stacks 3–5 (weight 30), chest 3 pays
+  OilTank tool 1–2 (weight 20) — whatever arrives, the rewards module just claims it.
 - `MineHits` quest never counts progress (server-side gap), and the `Minable` flag is useless as a
   filter — don't build anything on either.
 

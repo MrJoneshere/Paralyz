@@ -85,6 +85,14 @@ return {
 		-- and damage math are not writable from here.
 		gunDelay = 0.4,
 		gunRange = 800,
+		-- HexSpitter ("Moon Gun"): its LocalScript fire loop reads these
+		-- Configuration values client-side, so pinning them has real effect.
+		-- FireRate = seconds between bursts (stock 0.06); the loop is bound
+		-- by remote round-trips anyway, so this is a feel knob, not a kick
+		-- risk. hexPellets raises Burst.Bullets.MaxValue: more pellets per
+		-- trigger at a slower cycle (true volley semantics).
+		hexFireRate = 0.02,
+		hexPellets = 8,
 	},
 
 	travel = {
