@@ -26,7 +26,7 @@ While the repo is still **private**, HttpGet cannot read it, so use the bundled 
 | `src/perf.luau` | No-render mode (quality, shadows, post effects, FPS cap) |
 | `src/esp.luau` | Highlight-pool ESP (capped per layer) + one optional label |
 | `src/farm.luau` | Auto-farm: stance hold inside the server's mining range, swing, auto-fix, collect, sell |
-| `src/combat.luau` | Auto-swing, keep-distance, best-effort damage guard |
+| `src/combat.luau` | Keep-distance guard + gun mods (no cooldown, volley) |
 | `src/travel.luau` | Teleport, noclip, fly |
 | `scripts/build.mjs` | Packs everything into `dist/paralyz.bundle.luau` |
 | `dist/paralyz.bundle.luau` | Self-contained build for the private-repo phase |

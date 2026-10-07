@@ -258,8 +258,62 @@ return function(deps)
 		return best
 	end
 
+	-- A part inside some planet's Rocks folder - what the server accepts as
+	-- a swing target (aiming at any other part drops the swing, measured).
+	function util.isRockPart(inst: Instance?): boolean
+		local p: Instance? = inst
+		while p and p ~= workspace do
+			if p:IsA("Folder") and p.Name == "Rocks" then
+				return true
+			end
+			p = p.Parent
+		end
+		return false
+	end
+
+	-- Rocks within radius of a point: what "loaded around me" means. Rocks
+	-- from the planet you just left linger while they stream out, and the
+	-- server range rule makes swinging at them useless anyway, so every
+	-- proximity question in the farm is asked through this.
+	function util.rocksNear(origin: Vector3, radius: number): { BasePart }
+		local out = {}
+		for _, rock in ipairs(util.rocks()) do
+			if (rock.Position - origin).Magnitude <= radius then
+				table.insert(out, rock)
+			end
+		end
+		return out
+	end
+
+	-- After a teleport, wait until the destination has actually streamed in:
+	-- the server spawns rocks a few seconds after the character arrives, and
+	-- judging emptiness from far away (the old behaviour) just bounced the
+	-- farm across unloaded space. Returns the rock count when the wait ends;
+	-- 0 means still empty after `timeout` seconds.
+	function util.settleRocks(pos: Vector3, timeout: number, radius: number?): number
+		local r = radius or config.farm.streamRadius
+		local deadline = os.clock() + timeout
+		local origin = pos
+		while os.clock() < deadline do
+			local root = util.root()
+			origin = root and root.Position or pos
+			local n = #util.rocksNear(origin, r)
+			if n > 0 then
+				return n
+			end
+			task.wait(0.5)
+		end
+		local root = util.root()
+		origin = root and root.Position or pos
+		return #util.rocksNear(origin, r)
+	end
+
 	-- Where a teleport should land: raycast down from above the point so the
-	-- character ends on the surface instead of inside the geometry.
+	-- character ends on the surface instead of inside the geometry. The
+	-- near ray covers hubs and small structures (and only ever lands in
+	-- pos+600..pos-900); planet centres sit INSIDE their own mesh, where a
+	-- ray starting inside cannot hit the surface (backfaces), so a miss
+	-- retries from high above before giving up.
 	function util.dropToSurface(pos: Vector3): Vector3
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Exclude
@@ -268,7 +322,27 @@ return function(deps)
 		if hit then
 			return hit.Position + Vector3.new(0, 5, 0)
 		end
+		hit = workspace:Raycast(pos + Vector3.new(0, 5000, 0), Vector3.new(0, -10000, 0), params)
+		if hit then
+			return hit.Position + Vector3.new(0, 5, 0)
+		end
 		return pos + Vector3.new(0, 10, 0)
+	end
+
+	-- Every teleport in the hub fires this (travel and the farm both call
+	-- it): the farm pins the character with a per-frame hold, so a teleport
+	-- the hold does not know about gets overwritten on the very next frame.
+	-- The farm assigns a listener that moves the hold onto the new spot.
+	local teleportListener: ((CFrame) -> ())? = nil
+
+	function util.onTeleport(fn: ((CFrame) -> ()))
+		teleportListener = fn
+	end
+
+	function util.teleported(cf: CFrame)
+		if teleportListener then
+			task.spawn(pcall, teleportListener, cf)
+		end
 	end
 
 	-- Every planet that exists right now: centre plus how many rocks are
@@ -301,6 +375,38 @@ return function(deps)
 					end
 				end
 				table.insert(out, { name = planet.Name, centre = centre, rocks = rocks })
+			end
+		end
+		return out
+	end
+
+	-- Converter economy: PumpJack/Pumper buildings ("MoonJuice Tanks Will
+	-- Spawn Every 1 Minute"), and the SpaceStation anti-matter machine
+	-- (prompt "Insert Moonjuice": 1 Ion MoonJuice -> 1 Anti Matter
+	-- MoonJuice, worth more than plain juice). None of these are permanent -
+	-- they only exist once somebody spends Events.Buy on them, so phases
+	-- bring them and go. This reports what is actually standing in the
+	-- world right now; the use-it options wait on live observation.
+	function util.converters(): { string }
+		local out, seen = {}, {}
+		local function add(label: string)
+			if not seen[label] then
+				seen[label] = true
+				table.insert(out, label)
+			end
+		end
+		for _, child in ipairs(workspace:GetChildren()) do
+			if string.find(child.Name, "Pump", 1, true) then
+				add(child.Name)
+			end
+		end
+		local planets = workspace:FindFirstChild("Planets")
+		if planets then
+			for _, planet in ipairs(planets:GetChildren()) do
+				local station = (planet :: any):FindFirstChild("SpaceStation")
+				if station and (station :: any):FindFirstChild("ConverterMachine") then
+					add("AntiMatter@" .. planet.Name)
+				end
 			end
 		end
 		return out
@@ -355,8 +461,14 @@ return function(deps)
 
 	--------------------------------------------------------------------- aim
 	-- The game asks the client for Mouse.Target when a tool is activated, so
-	-- mining only works when the camera's ray through the mouse really lands on
-	-- the rock. This solves a camera CFrame that makes that true, then holds it.
+	-- a swing only pays while the camera's ray through the mouse lands on a
+	-- rock the character is in range of (both rules measured: non-rock targets
+	-- and >30-stud distance are dropped, and firing the remote directly
+	-- without a real Tool.Activated is ignored outright). aimAt therefore
+	-- tries several camera bases - side, straight up, far side - and ALWAYS
+	-- releases the camera again when every base fails; an unbound-on-fail
+	-- solve is what used to leave the view glued to the rock while no swings
+	-- happened at all.
 	local AIM_BIND = "ParalyzAim"
 
 	function util.stopAim()
@@ -365,25 +477,13 @@ return function(deps)
 		end)
 	end
 
-	local function solveAimCFrame(targetPos: Vector3, standOff: number): CFrame?
-		local cam = workspace.CurrentCamera
-		if not cam then
-			return nil
-		end
+	local function solveToward(cam: Camera, targetPos: Vector3, base: Vector3): CFrame
 		local mouse = LocalPlayer:GetMouse()
-		local mousePx = Vector2.new(mouse.X, mouse.Y)
-
-		-- Keep the current side of the target so the view never flips.
-		local offset = cam.CFrame.Position - targetPos
-		if offset.Magnitude < 1 then
-			offset = Vector3.new(0, 1, 0)
-		end
-		local base = targetPos + offset.Unit * standOff + Vector3.new(0, 3, 0)
-
+		local px = Vector2.new(mouse.X, mouse.Y)
 		local cf = CFrame.lookAt(base, targetPos)
 		for _ = 1, 12 do
 			cam.CFrame = cf
-			local ray = cam:ViewportPointToRay(mousePx.X, mousePx.Y)
+			local ray = cam:ViewportPointToRay(px.X, px.Y)
 			local desired = targetPos - ray.Origin
 			if desired.Magnitude < 1 then
 				break
@@ -396,31 +496,76 @@ return function(deps)
 		return cf
 	end
 
-	-- Returns true when the camera is locked on and the mouse sees the target.
-	-- Accepts either the exact part (any hit on it puts the part's own position
-	-- under the cursor, which matches to the millimetre) or a bare position
-	-- such as a monster pivot, where a small tolerance is right. Comparing the
-	-- instance against the Vector3 - the bug this replaced - is always false.
-	function util.aimAt(targetPos: Vector3?, standOff: number?): boolean
+	-- True when this hit would really be paid out: any rock part within the
+	-- server's swing range of the character (a neighbouring rock is a valid
+	-- target too - rejecting those was the aim-failure storm), or, for bare
+	-- positions such as a monster pivot, a hit close to that point.
+	local function aimValid(mt: BasePart?, target: Vector3): boolean
+		if not mt then
+			return false
+		end
+		if util.isRockPart(mt) then
+			local root = util.root()
+			return root ~= nil and util.dist(root.Position, mt.Position) <= config.farm.maxRange + 4
+		end
+		return util.dist(mt.Position, target) <= 12
+	end
+
+	-- holdOnFail: keep the camera where the last attempt left it instead of
+	-- snapping it back to the pre-aim view. The farm passes this while it
+	-- runs: restore-then-relock every batch was the visible camera churn
+	-- (lock, restore, lock, restore). While running the aim simply moves
+	-- from target to target; the view is handed back exactly once, when the
+	-- farm stops.
+	function util.aimAt(targetPos: Vector3?, standOff: number?, holdOnFail: boolean?): boolean
 		local target = targetPos or (util.root() and util.root().Position)
 		if not target then
 			return false
 		end
-		local cf = solveAimCFrame(target, standOff or config.farm.aimDistance)
-		if not cf then
-			return false
-		end
 		local cam = workspace.CurrentCamera
-		util.stopAim()
-		RunService:BindToRenderStep(AIM_BIND, Enum.RenderPriority.Camera.Value + 1, function()
-			cam.CFrame = cf
-		end)
-		task.wait() -- let the frame land so Mouse.Target refreshes
-		local mt = util.mouseTarget()
-		if not mt then
+		if not cam then
 			return false
 		end
-		return (mt.Position - target).Magnitude <= 12
+		local startCF = cam.CFrame
+		local so = standOff or config.farm.aimDistance
+		local side = startCF.Position - target
+		if side.Magnitude < 1 then
+			side = Vector3.new(0, 1, 0)
+		end
+		side = side.Unit
+		-- Bases in order of robustness. Straight up is the reliable one:
+		-- nothing on the ground can occlude a rock seen from directly above,
+		-- and after a long teleport the old single side-basis pointed into
+		-- unloaded geometry, which is where the permanent failures came from.
+		local bases = {
+			target + side * so + Vector3.new(0, 3, 0),
+			target + Vector3.new(0, math.max(so, 30), 0),
+			target - side * so + Vector3.new(0, 3, 0),
+		}
+		for _, base in ipairs(bases) do
+			local cf = solveToward(cam, target, base)
+			util.stopAim()
+			RunService:BindToRenderStep(AIM_BIND, Enum.RenderPriority.Camera.Value + 1, function()
+				cam.CFrame = cf
+			end)
+			task.wait() -- let the frame land so Mouse.Target refreshes
+			if aimValid(util.mouseTarget(), target) then
+				return true
+			end
+			if holdOnFail then
+				-- Leave the last attempt bound: the next aim call rebinds
+				-- anyway, and a mid-run restore is exactly the snap the user
+				-- sees as camera jitter.
+				continue
+			end
+			util.stopAim()
+		end
+		if holdOnFail then
+			return false
+		end
+		-- Nothing worked and nobody is mid-run: hand the view back exactly as it was.
+		cam.CFrame = startCF
+		return false
 	end
 
 	function util.mouseTarget(): BasePart?

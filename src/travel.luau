@@ -84,9 +84,16 @@ return function(deps)
 		return out
 	end
 
+	-- Session-local memory of where destinations were when they last
+	-- existed: content unloads with distance, so "not in this world" often
+	-- just means "not loaded yet". Teleporting to the last-known spot lets
+	-- streaming bring it back, then the destination re-resolves fresh.
+	local known: { [string]: Vector3 } = {}
+
 	-- Teleport to a named destination. Planet "Center" parts are the planet
 	-- itself, so landing uses the shared surface raycast: drop from above
-	-- and land on the ground, never inside the geometry.
+	-- and land on the ground, never inside the geometry. After a planet
+	-- landing the destination gets time to load before reporting anything.
 	function travel.to(name: string): boolean
 		local entry = nil
 		for _, d in ipairs(travel.destinations) do
@@ -101,6 +108,15 @@ return function(deps)
 
 		local pos = entry.resolve()
 		if not pos then
+			-- Unloaded but visited this session: go to where it was and let
+			-- the load bring it back (checked again after the wait below).
+			local cached = known[entry.name]
+			if cached then
+				util.notify("Teleport", entry.name .. " is not loaded - going to its last position")
+				pos = cached
+			end
+		end
+		if not pos then
 			-- The requested place is not in this world phase: fall back to a
 			-- sibling in the same group instead of failing outright.
 			for _, alt in ipairs(travel.destinations) do
@@ -113,13 +129,14 @@ return function(deps)
 						)
 						entry = alt
 						pos = altPos
+						known[alt.name] = altPos
 						break
 					end
 				end
 			end
 		end
 		if not pos then
-			util.notify("Teleport failed", name .. " is not in this world yet")
+			util.notify("Teleport failed", name .. " is not in this world yet - get near it once so it can load")
 			return false
 		end
 
@@ -127,7 +144,49 @@ return function(deps)
 		if not root then
 			return false
 		end
-		root.CFrame = CFrame.new(util.dropToSurface(pos))
+		local land = util.dropToSurface(pos)
+		root.CFrame = CFrame.new(land)
+		util.teleported(root.CFrame)
+
+		-- Planets take a few seconds to stream in after you land: wait for
+		-- the load, re-resolve in case the real position differs from the
+		-- remembered one, and ALWAYS land on the fresh spot afterwards (the
+		-- old code skipped this when re-resolving failed, which is exactly
+		-- the "it loads but never takes me there" the user had to spam past).
+		if entry.group == "planet" then
+			local n = util.settleRocks(pos, config.farm.loadWait, config.farm.streamRadius)
+			local fresh = entry.resolve() or pos
+			known[entry.name] = fresh
+			-- Re-fetch the root: the wait long enough for a respawn, and a
+			-- stale BasePart reference silently does nothing.
+			local landed = false
+			for _ = 1, 4 do
+				root = util.root()
+				if not root then
+					task.wait(0.5)
+					continue
+				end
+				local target = CFrame.new(util.dropToSurface(fresh))
+				root.CFrame = target
+				util.teleported(target)
+				task.wait(0.25)
+				if util.root() and util.dist(util.root().Position, target.Position) < 400 then
+					landed = true
+					break
+				end
+			end
+			local suffix
+			if not landed then
+				suffix = " - load wait ended but the landing would not stick"
+			elseif n > 0 then
+				suffix = " - loaded, " .. n .. " rocks"
+			else
+				suffix = " - still empty after waiting"
+			end
+			util.notify("Teleport", entry.name .. suffix)
+		else
+			known[entry.name] = pos
+		end
 		return true
 	end
 
@@ -139,6 +198,7 @@ return function(deps)
 			return false
 		end
 		root.CFrame = CFrame.new(pos + Vector3.new(0, 6, 0))
+		util.teleported(root.CFrame)
 		return true
 	end
 
@@ -191,6 +251,17 @@ return function(deps)
 				flyConn:Disconnect()
 				flyConn = nil
 			end
+			-- Give collisions back unless the Noclip toggle wants them off.
+			if not state.enabled("Noclip") then
+				local char = util.character()
+				if char then
+					for _, part in ipairs(char:GetDescendants()) do
+						if part:IsA("BasePart") then
+							part.CanCollide = true
+						end
+					end
+				end
+			end
 			return
 		end
 
@@ -199,6 +270,17 @@ return function(deps)
 			local hum = util.humanoid()
 			if not root or not hum then
 				return
+			end
+
+			-- Flying ignores geometry on its own: without this the higher
+			-- speed would just slam into walls whenever Noclip is off.
+			local char = util.character()
+			if char then
+				for _, part in ipairs(char:GetDescendants()) do
+					if part:IsA("BasePart") and part.CanCollide then
+						part.CanCollide = false
+					end
+				end
 			end
 
 			-- Camera-relative movement, driven by the same keys the player uses.

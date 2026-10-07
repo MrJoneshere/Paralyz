@@ -15,17 +15,22 @@ local PARALYZ_MODULES = {
 	["combat"] = [==[
 --!strict
 -- Paralyz / src/combat.luau
--- Auto-swing against nearby monsters, a keep-distance guard, and a
--- best-effort damage guard.
+-- Keep-distance guard and gun MODS.
 --
--- Honest scope: damage in this game appears to be applied server-side, so a
--- client cannot simply cancel it. What a client CAN do:
---   * kill things before they reach us (auto-swing)
---   * stay out of reach (avoid radius -> step back / fly up)
---   * hook TakeDamage if the game ever calls it from the client at all
---     (harmless when it does not - it just never fires)
--- The health watchdog tells us what actually happens when we take a hit, so
--- the guard can be tuned with facts instead of guesses.
+-- Scope decided with the user: no auto-swing / auto-shoot helpers (they
+-- were weak and camera-locking) and no damage guard - damage in this game
+-- is applied server-side, so a client cannot cancel it. What a client CAN
+-- change is how its own guns are FIRED: rate, client gates, and how many
+-- targets one trigger touches. That is what these mods do. The user aims;
+-- the mods remove the limits.
+--
+-- What the guns actually are (read from the tools themselves):
+--   Rail Gun        LocalScript fires tool.Click:FireServer(mouse.Hit.p) on
+--                   Button1Down; the 5s wait in that script is only the
+--                   cursor icon, and the remote takes an explicit position.
+--   RocketLauncher  the client side is just MouseLoc.OnClientInvoke
+--                   returning Mouse.Hit.p - the server pulls the aim when
+--                   it fires - plus Tool.Enabled mirroring a server gate.
 
 return function(deps)
 	local config = deps.config
@@ -33,74 +38,6 @@ return function(deps)
 	local util = deps.util
 
 	local combat = {}
-
-	--------------------------------------------------------------- auto-swing
-	local swingRunning = false
-	local swingThread: thread? = nil
-
-	local function bestSword(): Tool?
-		-- Preference order, then anything that looks like a weapon.
-		local preference = { "Omega", "Sword", "Blade", "Saber", "Rail", "Rocket" }
-		for _, key in ipairs(preference) do
-			local found = util.findTool(key)
-			if found then
-				return found
-			end
-		end
-		return nil
-	end
-
-	local function swingLoop()
-		while swingRunning do
-			if not util.alive() then
-				task.wait(1)
-				continue
-			end
-
-			local root = util.root()
-			local monster = root and util.nearestMonster(root.Position, config.combat.swingRange)
-			if not monster then
-				task.wait(0.25)
-				continue
-			end
-
-			local sword = bestSword()
-			if not sword then
-				task.wait(1)
-				continue
-			end
-			if not util.equip(sword) then
-				task.wait(0.5)
-				continue
-			end
-
-			-- Aim at the monster the same way mining aims at a rock - stand off
-			-- from its edge, not its pivot - then swing.
-			local pivot = monster:GetPivot().Position
-			local size = monster:GetExtentsSize()
-			util.aimAt(pivot, math.max(size.X, size.Y, size.Z) / 2 + 20)
-			pcall(function()
-				sword:Activate()
-			end)
-			task.wait(config.combat.swingDelay)
-		end
-		util.stopAim()
-		swingRunning = false
-	end
-
-	function combat.startSwing()
-		if swingRunning then
-			return false
-		end
-		swingRunning = true
-		swingThread = task.spawn(swingLoop)
-		return true
-	end
-
-	function combat.stopSwing()
-		swingRunning = false
-		util.stopAim()
-	end
 
 	------------------------------------------------------------------- avoid
 	local avoidConn: RBXScriptConnection? = nil
@@ -134,94 +71,112 @@ return function(deps)
 		end
 	end
 
-	----------------------------------------------------------- damage guard
-	-- Best effort: intercept client-side TakeDamage on our own humanoid.
-	-- If damage arrives from the server (most likely), this never fires and we
-	-- say so in the log rather than pretending it works.
-	local guardHooked = false
-	local guardBlocked = 0
+	---------------------------------------------------------------- gun mods
+	-- GunRapid: refire the equipped gun every config.combat.gunDelay,
+	-- clearing the rocket's client-side Enabled gate first. No camera
+	-- movement anywhere - the mod fires where the user is already looking.
+	-- GunVolley: every rail trigger additionally sends a shot at every
+	-- monster in gunRange. Server damage math is not client-writable, so
+	-- this is the honest "bigger hitbox": one trigger, the whole crowd.
+	local modRunning = false
+	local nextFire = 0
 
-	function combat.enableGuard(): string
-		if guardHooked then
-			return "guard already active"
+	local function gunKind(tool: Tool?): string?
+		if not tool then
+			return nil
 		end
-		if not hookmetamethod or not getrawmetatable then
-			return "no metatable hook available in this environment"
+		local low = string.lower(tool.Name)
+		if string.find(low, "rail", 1, true) then
+			return "rail"
 		end
+		if string.find(low, "rocket", 1, true) then
+			return "rocket"
+		end
+		return nil
+	end
 
-		local ok, err = pcall(function()
-			local mt = getrawmetatable(game)
-			local oldNamecall = mt.__namecall
-			setreadonly(mt, false)
-			mt.__namecall = newcclosure(function(self, ...)
-				local method = getnamecallmethod()
-				if (method == "TakeDamage" or method == "ChangeHealth") and self == util.humanoid() then
-					guardBlocked += 1
-					return nil
+	local function modLoop()
+		while modRunning do
+			local rapid = state.enabled("GunRapid")
+			local volley = state.enabled("GunVolley")
+			if not rapid and not volley then
+				task.wait(0.25)
+				continue
+			end
+			if not util.alive() then
+				task.wait(0.5)
+				continue
+			end
+
+			local tool = util.equippedTool()
+			local kind = gunKind(tool)
+			if not kind or not tool then
+				task.wait(0.3)
+				continue
+			end
+
+			local now = os.clock()
+			if now < nextFire then
+				task.wait(0.05)
+				continue
+			end
+
+			if kind == "rail" then
+				local click = (tool :: Tool):FindFirstChild("Click")
+				if click and click:IsA("RemoteEvent") then
+					local mouse = game:GetService("Players").LocalPlayer:GetMouse()
+					click:FireServer(mouse.Hit.Position)
+					if volley then
+						local root = util.root()
+						if root then
+							for _, monster in ipairs(util.aliveMonsters()) do
+								local pivot = monster:GetPivot().Position
+								if util.dist(root.Position, pivot) <= config.combat.gunRange then
+									click:FireServer(pivot)
+								end
+							end
+						end
+					end
+					nextFire = now + config.combat.gunDelay
 				end
-				return oldNamecall(self, ...)
-			end)
-			setreadonly(mt, true)
-		end)
-
-		if ok then
-			guardHooked = true
-			return "guard installed (blocks client TakeDamage)"
+			else
+				-- Client gate only; the server owns the real cooldown.
+				(tool :: Tool).Enabled = true
+				pcall(function()
+					(tool :: Tool):Activate()
+				end)
+				nextFire = now + config.combat.gunDelay
+			end
+			task.wait(0.05)
 		end
-		return "guard failed: " .. tostring(err)
 	end
 
-	----------------------------------------------------------- health watch
-	local lastHealth = 100
-	local watchConn: RBXScriptConnection? = nil
-
-	function combat.startWatch()
-		if watchConn then
-			return
+	function combat.startGuns()
+		if modRunning then
+			return false
 		end
-		watchConn = util.RunService.Heartbeat:Connect(function()
-			local hum = util.humanoid()
-			if not hum then
-				return
-			end
-			if hum.Health < lastHealth then
-				local delta = lastHealth - hum.Health
-				util.notify(
-					"Damage taken",
-					string.format("-%d hp (%d left), guard blocked %d", delta, math.floor(hum.Health), guardBlocked)
-				)
-			end
-			lastHealth = hum.Health
-		end)
+		modRunning = true
+		nextFire = 0
+		task.spawn(modLoop)
+		return true
 	end
 
-	function combat.stopWatch()
-		if watchConn then
-			watchConn:Disconnect()
-			watchConn = nil
-		end
+	function combat.stopGuns()
+		modRunning = false
 	end
 
 	function combat.sync()
-		if state.enabled("AutoSwing") then
-			combat.startSwing()
-		else
-			combat.stopSwing()
-		end
 		setAvoid(state.enabled("Avoid"))
-		if state.enabled("GodMode") then
-			local msg = combat.enableGuard()
-			combat.startWatch()
-			util.notify("Damage guard", msg)
+		if state.enabled("GunRapid") or state.enabled("GunVolley") then
+			combat.startGuns()
 		else
-			combat.stopWatch()
+			combat.stopGuns()
 		end
 	end
 
 	function combat.stop()
-		combat.stopSwing()
+		combat.stopGuns()
 		setAvoid(false)
-		combat.stopWatch()
 	end
 
 	return combat
@@ -264,9 +219,26 @@ return {
 		stallSwings = 10,
 		rockSwitchDelay = 20,
 
-		-- No rocks anywhere in the world: after this many empty waits the farm
-		-- teleports to another planet and lets the rocks stream in there.
+		-- No rocks anywhere near the character: after this many empty waits
+		-- the farm probes another planet.
 		planetWaits = 3,
+		-- Arriving somewhere: rocks stream in a few seconds after the
+		-- character lands, so after a teleport the farm waits this long for
+		-- the destination to load before deciding it is empty. Travel uses
+		-- the same wait to confirm a load.
+		loadWait = 15,
+		-- How far from the character rocks still count as "here". Rocks from
+		-- the previous planet linger while streaming out, and swinging at
+		-- them is pointless anyway (the server range rule), so every
+		-- proximity question filters by this.
+		streamRadius = 2500,
+		-- A planet that loaded empty goes on "not right now" for this long.
+		-- Never forever: content appears later as phases advance.
+		planetCooldown = 45,
+		-- Every planet in the world probed and found empty: pause this long
+		-- before starting another sweep instead of bouncing map-edge to
+		-- map-edge.
+		emptyPause = 30,
 	},
 
 	esp = {
@@ -291,17 +263,19 @@ return {
 	},
 
 	combat = {
-		-- Seconds between swings of the auto-attack.
-		swingDelay = 0.45,
-		-- How close a monster has to be before we swing at it.
-		swingRange = 18,
 		-- Keep-distance when Avoid is on: monsters inside this radius trigger a step back.
 		avoidRadius = 14,
+		-- Gun mods: refire cadence while a mod is armed, and the range the
+		-- volley sprays monsters at. Client-side only - server rate limits
+		-- and damage math are not writable from here.
+		gunDelay = 0.4,
+		gunRange = 800,
 	},
 
 	travel = {
-		-- Fly speed, studs per frame multiplier of the camera direction.
-		flySpeed = 2.5,
+		-- Fly speed, studs per second is this times 60: 8 -> ~480 studs/s,
+		-- which crosses the 10k-stud gaps between planets in a usable time.
+		flySpeed = 8,
 	},
 
 	perf = {
@@ -747,14 +721,38 @@ return function(deps)
 
 	-- rocks on cooldown after a stall (rock -> release time)
 	local avoided: { [BasePart]: number } = {}
-	local lastPlanet: string? = nil
+	-- planets loaded but empty right now (name -> release time), and a pause
+	-- between full sweeps of the world (see rotatePlanet)
+	local planetCool: { [string]: number } = {}
+	local rotatePause = 0
 
-	local function report(msg: string)
-		if os.clock() - lastReport > 2 then
+	local function report(msg: string, force: boolean?)
+		-- Rotation lifecycle messages force their way through: hiding
+		-- "moving to X" behind the throttle made every run look like it
+		-- declared planets empty without ever going there.
+		if force or os.clock() - lastReport > 2 then
 			lastReport = os.clock()
 			util.notify("Auto-Farm", msg)
 		end
 	end
+
+	-- Live phase for the menu's stat line, so what the farm is doing is
+	-- visible continuously instead of only as fading toasts.
+	local phase = "idle"
+	local function setPhase(p: string)
+		phase = p
+	end
+
+	-- Travel teleports must move the hold with them: without this the
+	-- per-frame stance pin overwrites the teleport on the next frame, which
+	-- is why a manual teleport during a farm run appeared to do nothing
+	-- until it was spammed (it only landed when the rotation happened to
+	-- rewrite the hold).
+	util.onTeleport(function(cf)
+		if running then
+			holdCF = cf
+		end
+	end)
 
 	------------------------------------------------------------------ stance
 	local function hidden(): boolean
@@ -850,7 +848,10 @@ return function(deps)
 			end
 		end
 		local best, bestD
-		for _, rock in ipairs(util.rocks()) do
+		-- Only rocks that are actually streamed in around the character: the
+		-- previous planet's rocks linger in memory while they stream out, and
+		-- a stance at one of those would teleport the farm straight back.
+		for _, rock in ipairs(util.rocksNear(fromPos, config.farm.streamRadius)) do
 			if not avoided[rock] then
 				local d = util.dist(fromPos, rock.Position)
 				if not bestD or d < bestD then
@@ -876,42 +877,105 @@ return function(deps)
 		return false
 	end
 
-	-- No rocks anywhere: the character is out of stream range or the phase
-	-- has none. Move to another planet and let the rocks stream in.
-	local function rotatePlanet()
+	-- Probe planets one at a time, the way the map actually works: teleport,
+	-- WAIT for the destination to load (rocks spawn seconds after you arrive;
+	-- judging emptiness from far away - the old behaviour - just bounced the
+	-- farm across unloaded space until nothing was loaded anywhere), and only
+	-- then decide. Candidates are tried nearest-first, an empty planet cools
+	-- down instead of being re-probed forever, and cooled planets come back
+	-- later because content appears as phases advance. Returns true when the
+	-- character ended up somewhere with rocks.
+	-- Rotate with the hold: the per-frame stance hold would otherwise snap
+	-- the character straight back to the rock we just left, which made every
+	-- planet probe judge emptiness from the OLD position (and read to the
+	-- user as "it teleported me somewhere random"). The aim unbinds here
+	-- too - not a restore, just a free camera while travelling - and the
+	-- next rock re-aims on its own.
+	local function rotateTeleport(cf: CFrame)
+		util.stopAim()
+		holdCF = cf
+		local root = util.root()
+		if root then
+			root.CFrame = cf
+		end
+		util.teleported(cf)
+	end
+
+	local function rotatePlanet(): boolean
 		local root = util.root()
 		if not root then
-			return
+			return false
+		end
+		local now = os.clock()
+		for name, untilT in pairs(planetCool) do
+			if untilT <= now then
+				planetCool[name] = nil
+			end
 		end
 		local scan = util.planetScan()
 		if #scan == 0 then
-			return
+			setPhase("no planets visible - waiting")
+			report("no planets are loaded right now - waiting", true)
+			return false
 		end
-		table.sort(scan, function(a, b)
-			return a.rocks > b.rocks
-		end)
-		-- Prefer a planet that already shows rocks and is not where we just
-		-- looked, so repeated rotations keep making progress.
-		local target = nil
+		-- Planets we are already standing among: the emptiness is proven by
+		-- presence (the farm only rotates when nothing is loaded within
+		-- streamRadius), so cool them instead of probing ourselves again.
 		for _, p in ipairs(scan) do
-			if p.rocks > 0 and p.name ~= lastPlanet then
-				target = p
-				break
+			if util.dist(p.centre, root.Position) <= config.farm.streamRadius then
+				planetCool[p.name] = now + config.farm.planetCooldown
 			end
 		end
-		if not target then
+		table.sort(scan, function(a, b)
+			-- Live rock counts first (meaningful only for planets already
+			-- streamed in), then nearest: probing the closest unknown planet
+			-- beats hopping to the far edge of the map.
+			if (a.rocks > 0) ~= (b.rocks > 0) then
+				return a.rocks > 0
+			end
+			return util.dist(a.centre, root.Position) < util.dist(b.centre, root.Position)
+		end)
+
+		local tried = 0
+		local swept = false -- one full retry pass after clearing cooldowns
+		while running and tried < #scan do
+			local target = nil
 			for _, p in ipairs(scan) do
-				if p.name ~= lastPlanet then
+				if not planetCool[p.name] then
 					target = p
 					break
 				end
 			end
+			if not target then
+				if swept then
+					break
+				end
+				planetCool = {}
+				swept = true
+				continue
+			end
+			tried += 1
+			rotateTeleport(CFrame.new(util.dropToSurface(target.centre)))
+			setPhase("loading " .. target.name)
+			report("moving to " .. target.name .. " - going there to load it", true)
+			task.wait(1)
+			local n = util.settleRocks(target.centre, config.farm.loadWait, config.farm.streamRadius)
+			root = util.root()
+			if not root then
+				return false
+			end
+			if n > 0 then
+				-- Land precisely on the surface now that the load confirmed
+				-- rocks here, and pin the hold to the landing spot.
+				rotateTeleport(CFrame.new(util.dropToSurface(target.centre)))
+				setPhase("loaded " .. target.name)
+				report(target.name .. " loaded in person: " .. n .. " rocks", true)
+				return true
+			end
+			planetCool[target.name] = os.clock() + config.farm.planetCooldown
+			report(target.name .. ": went there, waited, empty for now - trying another planet", true)
 		end
-		target = target or scan[1]
-		lastPlanet = target.name
-		root.CFrame = CFrame.new(util.dropToSurface(target.centre))
-		report("no rocks anywhere - moving to " .. target.name)
-		task.wait(1)
+		return false
 	end
 
 	-- The auto-fix chain: swings go dead for no visible reason -> heal the
@@ -947,7 +1011,8 @@ return function(deps)
 
 		cycles, gained, sold, fixes, switches = 0, 0, 0, 0, 0
 		avoided = {}
-		lastPlanet = nil
+		planetCool = {}
+		rotatePause = 0
 		local stall = 0 -- swings since the last juice
 		local fixStage = 0
 		local emptyWaits = 0
@@ -978,6 +1043,7 @@ return function(deps)
 				break
 			end
 			if not util.alive() then
+				setPhase("waiting to respawn")
 				task.wait(1)
 				continue
 			end
@@ -1004,14 +1070,31 @@ return function(deps)
 
 			local rock = pickRock(root.Position)
 			if not rock then
-				if #util.rocks() > 0 and releaseOldestAvoided() then
+				local near = #util.rocksNear(root.Position, config.farm.streamRadius)
+				if near > 0 and releaseOldestAvoided() then
+					setPhase("freeing a stalled rock")
 					task.wait(1)
 					continue
 				end
 				emptyWaits += 1
+				setPhase("no rocks loaded here (" .. emptyWaits .. "/" .. config.farm.planetWaits .. ")")
 				if emptyWaits >= config.farm.planetWaits then
 					emptyWaits = 0
-					rotatePlanet()
+					if os.clock() >= rotatePause then
+						if rotatePlanet() then
+							rotatePause = 0
+						else
+							rotatePause = os.clock() + config.farm.emptyPause
+							report(
+								"probed every planet in person and all are empty - resting "
+									.. config.farm.emptyPause .. "s",
+								true
+							)
+							setPhase("resting - no planet has rocks")
+						end
+					else
+						setPhase("resting - no planet has rocks")
+					end
 				end
 				task.wait(config.farm.noRockDelay)
 				continue
@@ -1036,17 +1119,24 @@ return function(deps)
 			task.wait(config.farm.equipDelay)
 
 			-- Camera stand-off wider than the rock so the ray through the
-			-- cursor lands on its surface no matter where we stand.
+			-- cursor lands on its surface no matter where we stand. holdOnFail
+			-- keeps mid-run aim failures from snapping the view back and
+			-- forth; the release happens once, at stop.
 			local half = math.max(rock.Size.X, rock.Size.Y, rock.Size.Z) / 2
-			if not util.aimAt(rock.Position, half + 40) then
+			if not util.aimAt(rock.Position, half + 40, true) then
 				aimFails += 1
-				if aimFails % 10 == 0 then
-					report("aim cannot find the rock (" .. aimFails .. " tries)")
+				if aimFails % 6 == 0 then
+					-- Same spot from every basis keeps failing: leave this
+					-- rock instead of standing there aiming at nothing.
+					avoided[rock] = os.clock() + config.farm.rockSwitchDelay
+					switches += 1
+					report("camera cannot see this rock - moving to another")
 				end
 				task.wait(math.min(0.3 + aimFails * 0.2, 2))
 				continue
 			end
 			aimFails = 0
+			setPhase("mining")
 
 			-- Swing a batch, then re-evaluate: the aim may drift, the rock may
 			-- be gone, a test cap may be due.
@@ -1072,7 +1162,10 @@ return function(deps)
 				noteJuice()
 			end
 
-			util.stopAim()
+			-- NOTE: no stopAim here on purpose. The aim stays bound across
+			-- batches and simply rebinds to the next rock; releasing after
+			-- every batch was the lock/restore churn. stopAim happens at
+			-- loop end, on rotation, and in farm.stop.
 
 			-- Chain runs only after stallSwings dead swings; juice resets it.
 			if running and stall >= config.farm.stallSwings then
@@ -1091,6 +1184,7 @@ return function(deps)
 		util.stopAim()
 		stopHold()
 		restoreCollision()
+		setPhase("stopped")
 		running = false
 	end
 
@@ -1101,6 +1195,7 @@ return function(deps)
 		end
 		running = true
 		cycles, gained, sold, fixes, switches = 0, 0, 0, 0, 0
+		setPhase("starting")
 		thread = task.spawn(runLoop, opts)
 		return true
 	end
@@ -1119,11 +1214,12 @@ return function(deps)
 
 	function farm.stats(): string
 		return string.format(
-			"%d swings · %d juice · %d sold · %d fixes",
+			"%d swings · %d juice · %d sold · %d fixes · %s",
 			cycles,
 			gained,
 			sold,
-			fixes + switches
+			fixes + switches,
+			phase
 		)
 	end
 
@@ -1402,9 +1498,16 @@ return function(deps)
 		return out
 	end
 
+	-- Session-local memory of where destinations were when they last
+	-- existed: content unloads with distance, so "not in this world" often
+	-- just means "not loaded yet". Teleporting to the last-known spot lets
+	-- streaming bring it back, then the destination re-resolves fresh.
+	local known: { [string]: Vector3 } = {}
+
 	-- Teleport to a named destination. Planet "Center" parts are the planet
 	-- itself, so landing uses the shared surface raycast: drop from above
-	-- and land on the ground, never inside the geometry.
+	-- and land on the ground, never inside the geometry. After a planet
+	-- landing the destination gets time to load before reporting anything.
 	function travel.to(name: string): boolean
 		local entry = nil
 		for _, d in ipairs(travel.destinations) do
@@ -1419,6 +1522,15 @@ return function(deps)
 
 		local pos = entry.resolve()
 		if not pos then
+			-- Unloaded but visited this session: go to where it was and let
+			-- the load bring it back (checked again after the wait below).
+			local cached = known[entry.name]
+			if cached then
+				util.notify("Teleport", entry.name .. " is not loaded - going to its last position")
+				pos = cached
+			end
+		end
+		if not pos then
 			-- The requested place is not in this world phase: fall back to a
 			-- sibling in the same group instead of failing outright.
 			for _, alt in ipairs(travel.destinations) do
@@ -1431,13 +1543,14 @@ return function(deps)
 						)
 						entry = alt
 						pos = altPos
+						known[alt.name] = altPos
 						break
 					end
 				end
 			end
 		end
 		if not pos then
-			util.notify("Teleport failed", name .. " is not in this world yet")
+			util.notify("Teleport failed", name .. " is not in this world yet - get near it once so it can load")
 			return false
 		end
 
@@ -1445,7 +1558,49 @@ return function(deps)
 		if not root then
 			return false
 		end
-		root.CFrame = CFrame.new(util.dropToSurface(pos))
+		local land = util.dropToSurface(pos)
+		root.CFrame = CFrame.new(land)
+		util.teleported(root.CFrame)
+
+		-- Planets take a few seconds to stream in after you land: wait for
+		-- the load, re-resolve in case the real position differs from the
+		-- remembered one, and ALWAYS land on the fresh spot afterwards (the
+		-- old code skipped this when re-resolving failed, which is exactly
+		-- the "it loads but never takes me there" the user had to spam past).
+		if entry.group == "planet" then
+			local n = util.settleRocks(pos, config.farm.loadWait, config.farm.streamRadius)
+			local fresh = entry.resolve() or pos
+			known[entry.name] = fresh
+			-- Re-fetch the root: the wait long enough for a respawn, and a
+			-- stale BasePart reference silently does nothing.
+			local landed = false
+			for _ = 1, 4 do
+				root = util.root()
+				if not root then
+					task.wait(0.5)
+					continue
+				end
+				local target = CFrame.new(util.dropToSurface(fresh))
+				root.CFrame = target
+				util.teleported(target)
+				task.wait(0.25)
+				if util.root() and util.dist(util.root().Position, target.Position) < 400 then
+					landed = true
+					break
+				end
+			end
+			local suffix
+			if not landed then
+				suffix = " - load wait ended but the landing would not stick"
+			elseif n > 0 then
+				suffix = " - loaded, " .. n .. " rocks"
+			else
+				suffix = " - still empty after waiting"
+			end
+			util.notify("Teleport", entry.name .. suffix)
+		else
+			known[entry.name] = pos
+		end
 		return true
 	end
 
@@ -1457,6 +1612,7 @@ return function(deps)
 			return false
 		end
 		root.CFrame = CFrame.new(pos + Vector3.new(0, 6, 0))
+		util.teleported(root.CFrame)
 		return true
 	end
 
@@ -1509,6 +1665,17 @@ return function(deps)
 				flyConn:Disconnect()
 				flyConn = nil
 			end
+			-- Give collisions back unless the Noclip toggle wants them off.
+			if not state.enabled("Noclip") then
+				local char = util.character()
+				if char then
+					for _, part in ipairs(char:GetDescendants()) do
+						if part:IsA("BasePart") then
+							part.CanCollide = true
+						end
+					end
+				end
+			end
 			return
 		end
 
@@ -1517,6 +1684,17 @@ return function(deps)
 			local hum = util.humanoid()
 			if not root or not hum then
 				return
+			end
+
+			-- Flying ignores geometry on its own: without this the higher
+			-- speed would just slam into walls whenever Noclip is off.
+			local char = util.character()
+			if char then
+				for _, part in ipairs(char:GetDescendants()) do
+					if part:IsA("BasePart") and part.CanCollide then
+						part.CanCollide = false
+					end
+				end
 			end
 
 			-- Camera-relative movement, driven by the same keys the player uses.
@@ -1962,8 +2140,62 @@ return function(deps)
 		return best
 	end
 
+	-- A part inside some planet's Rocks folder - what the server accepts as
+	-- a swing target (aiming at any other part drops the swing, measured).
+	function util.isRockPart(inst: Instance?): boolean
+		local p: Instance? = inst
+		while p and p ~= workspace do
+			if p:IsA("Folder") and p.Name == "Rocks" then
+				return true
+			end
+			p = p.Parent
+		end
+		return false
+	end
+
+	-- Rocks within radius of a point: what "loaded around me" means. Rocks
+	-- from the planet you just left linger while they stream out, and the
+	-- server range rule makes swinging at them useless anyway, so every
+	-- proximity question in the farm is asked through this.
+	function util.rocksNear(origin: Vector3, radius: number): { BasePart }
+		local out = {}
+		for _, rock in ipairs(util.rocks()) do
+			if (rock.Position - origin).Magnitude <= radius then
+				table.insert(out, rock)
+			end
+		end
+		return out
+	end
+
+	-- After a teleport, wait until the destination has actually streamed in:
+	-- the server spawns rocks a few seconds after the character arrives, and
+	-- judging emptiness from far away (the old behaviour) just bounced the
+	-- farm across unloaded space. Returns the rock count when the wait ends;
+	-- 0 means still empty after `timeout` seconds.
+	function util.settleRocks(pos: Vector3, timeout: number, radius: number?): number
+		local r = radius or config.farm.streamRadius
+		local deadline = os.clock() + timeout
+		local origin = pos
+		while os.clock() < deadline do
+			local root = util.root()
+			origin = root and root.Position or pos
+			local n = #util.rocksNear(origin, r)
+			if n > 0 then
+				return n
+			end
+			task.wait(0.5)
+		end
+		local root = util.root()
+		origin = root and root.Position or pos
+		return #util.rocksNear(origin, r)
+	end
+
 	-- Where a teleport should land: raycast down from above the point so the
-	-- character ends on the surface instead of inside the geometry.
+	-- character ends on the surface instead of inside the geometry. The
+	-- near ray covers hubs and small structures (and only ever lands in
+	-- pos+600..pos-900); planet centres sit INSIDE their own mesh, where a
+	-- ray starting inside cannot hit the surface (backfaces), so a miss
+	-- retries from high above before giving up.
 	function util.dropToSurface(pos: Vector3): Vector3
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Exclude
@@ -1972,7 +2204,27 @@ return function(deps)
 		if hit then
 			return hit.Position + Vector3.new(0, 5, 0)
 		end
+		hit = workspace:Raycast(pos + Vector3.new(0, 5000, 0), Vector3.new(0, -10000, 0), params)
+		if hit then
+			return hit.Position + Vector3.new(0, 5, 0)
+		end
 		return pos + Vector3.new(0, 10, 0)
+	end
+
+	-- Every teleport in the hub fires this (travel and the farm both call
+	-- it): the farm pins the character with a per-frame hold, so a teleport
+	-- the hold does not know about gets overwritten on the very next frame.
+	-- The farm assigns a listener that moves the hold onto the new spot.
+	local teleportListener: ((CFrame) -> ())? = nil
+
+	function util.onTeleport(fn: ((CFrame) -> ()))
+		teleportListener = fn
+	end
+
+	function util.teleported(cf: CFrame)
+		if teleportListener then
+			task.spawn(pcall, teleportListener, cf)
+		end
 	end
 
 	-- Every planet that exists right now: centre plus how many rocks are
@@ -2005,6 +2257,38 @@ return function(deps)
 					end
 				end
 				table.insert(out, { name = planet.Name, centre = centre, rocks = rocks })
+			end
+		end
+		return out
+	end
+
+	-- Converter economy: PumpJack/Pumper buildings ("MoonJuice Tanks Will
+	-- Spawn Every 1 Minute"), and the SpaceStation anti-matter machine
+	-- (prompt "Insert Moonjuice": 1 Ion MoonJuice -> 1 Anti Matter
+	-- MoonJuice, worth more than plain juice). None of these are permanent -
+	-- they only exist once somebody spends Events.Buy on them, so phases
+	-- bring them and go. This reports what is actually standing in the
+	-- world right now; the use-it options wait on live observation.
+	function util.converters(): { string }
+		local out, seen = {}, {}
+		local function add(label: string)
+			if not seen[label] then
+				seen[label] = true
+				table.insert(out, label)
+			end
+		end
+		for _, child in ipairs(workspace:GetChildren()) do
+			if string.find(child.Name, "Pump", 1, true) then
+				add(child.Name)
+			end
+		end
+		local planets = workspace:FindFirstChild("Planets")
+		if planets then
+			for _, planet in ipairs(planets:GetChildren()) do
+				local station = (planet :: any):FindFirstChild("SpaceStation")
+				if station and (station :: any):FindFirstChild("ConverterMachine") then
+					add("AntiMatter@" .. planet.Name)
+				end
 			end
 		end
 		return out
@@ -2059,8 +2343,14 @@ return function(deps)
 
 	--------------------------------------------------------------------- aim
 	-- The game asks the client for Mouse.Target when a tool is activated, so
-	-- mining only works when the camera's ray through the mouse really lands on
-	-- the rock. This solves a camera CFrame that makes that true, then holds it.
+	-- a swing only pays while the camera's ray through the mouse lands on a
+	-- rock the character is in range of (both rules measured: non-rock targets
+	-- and >30-stud distance are dropped, and firing the remote directly
+	-- without a real Tool.Activated is ignored outright). aimAt therefore
+	-- tries several camera bases - side, straight up, far side - and ALWAYS
+	-- releases the camera again when every base fails; an unbound-on-fail
+	-- solve is what used to leave the view glued to the rock while no swings
+	-- happened at all.
 	local AIM_BIND = "ParalyzAim"
 
 	function util.stopAim()
@@ -2069,25 +2359,13 @@ return function(deps)
 		end)
 	end
 
-	local function solveAimCFrame(targetPos: Vector3, standOff: number): CFrame?
-		local cam = workspace.CurrentCamera
-		if not cam then
-			return nil
-		end
+	local function solveToward(cam: Camera, targetPos: Vector3, base: Vector3): CFrame
 		local mouse = LocalPlayer:GetMouse()
-		local mousePx = Vector2.new(mouse.X, mouse.Y)
-
-		-- Keep the current side of the target so the view never flips.
-		local offset = cam.CFrame.Position - targetPos
-		if offset.Magnitude < 1 then
-			offset = Vector3.new(0, 1, 0)
-		end
-		local base = targetPos + offset.Unit * standOff + Vector3.new(0, 3, 0)
-
+		local px = Vector2.new(mouse.X, mouse.Y)
 		local cf = CFrame.lookAt(base, targetPos)
 		for _ = 1, 12 do
 			cam.CFrame = cf
-			local ray = cam:ViewportPointToRay(mousePx.X, mousePx.Y)
+			local ray = cam:ViewportPointToRay(px.X, px.Y)
 			local desired = targetPos - ray.Origin
 			if desired.Magnitude < 1 then
 				break
@@ -2100,31 +2378,76 @@ return function(deps)
 		return cf
 	end
 
-	-- Returns true when the camera is locked on and the mouse sees the target.
-	-- Accepts either the exact part (any hit on it puts the part's own position
-	-- under the cursor, which matches to the millimetre) or a bare position
-	-- such as a monster pivot, where a small tolerance is right. Comparing the
-	-- instance against the Vector3 - the bug this replaced - is always false.
-	function util.aimAt(targetPos: Vector3?, standOff: number?): boolean
+	-- True when this hit would really be paid out: any rock part within the
+	-- server's swing range of the character (a neighbouring rock is a valid
+	-- target too - rejecting those was the aim-failure storm), or, for bare
+	-- positions such as a monster pivot, a hit close to that point.
+	local function aimValid(mt: BasePart?, target: Vector3): boolean
+		if not mt then
+			return false
+		end
+		if util.isRockPart(mt) then
+			local root = util.root()
+			return root ~= nil and util.dist(root.Position, mt.Position) <= config.farm.maxRange + 4
+		end
+		return util.dist(mt.Position, target) <= 12
+	end
+
+	-- holdOnFail: keep the camera where the last attempt left it instead of
+	-- snapping it back to the pre-aim view. The farm passes this while it
+	-- runs: restore-then-relock every batch was the visible camera churn
+	-- (lock, restore, lock, restore). While running the aim simply moves
+	-- from target to target; the view is handed back exactly once, when the
+	-- farm stops.
+	function util.aimAt(targetPos: Vector3?, standOff: number?, holdOnFail: boolean?): boolean
 		local target = targetPos or (util.root() and util.root().Position)
 		if not target then
 			return false
 		end
-		local cf = solveAimCFrame(target, standOff or config.farm.aimDistance)
-		if not cf then
-			return false
-		end
 		local cam = workspace.CurrentCamera
-		util.stopAim()
-		RunService:BindToRenderStep(AIM_BIND, Enum.RenderPriority.Camera.Value + 1, function()
-			cam.CFrame = cf
-		end)
-		task.wait() -- let the frame land so Mouse.Target refreshes
-		local mt = util.mouseTarget()
-		if not mt then
+		if not cam then
 			return false
 		end
-		return (mt.Position - target).Magnitude <= 12
+		local startCF = cam.CFrame
+		local so = standOff or config.farm.aimDistance
+		local side = startCF.Position - target
+		if side.Magnitude < 1 then
+			side = Vector3.new(0, 1, 0)
+		end
+		side = side.Unit
+		-- Bases in order of robustness. Straight up is the reliable one:
+		-- nothing on the ground can occlude a rock seen from directly above,
+		-- and after a long teleport the old single side-basis pointed into
+		-- unloaded geometry, which is where the permanent failures came from.
+		local bases = {
+			target + side * so + Vector3.new(0, 3, 0),
+			target + Vector3.new(0, math.max(so, 30), 0),
+			target - side * so + Vector3.new(0, 3, 0),
+		}
+		for _, base in ipairs(bases) do
+			local cf = solveToward(cam, target, base)
+			util.stopAim()
+			RunService:BindToRenderStep(AIM_BIND, Enum.RenderPriority.Camera.Value + 1, function()
+				cam.CFrame = cf
+			end)
+			task.wait() -- let the frame land so Mouse.Target refreshes
+			if aimValid(util.mouseTarget(), target) then
+				return true
+			end
+			if holdOnFail then
+				-- Leave the last attempt bound: the next aim call rebinds
+				-- anyway, and a mid-run restore is exactly the snap the user
+				-- sees as camera jitter.
+				continue
+			end
+			util.stopAim()
+		end
+		if holdOnFail then
+			return false
+		end
+		-- Nothing worked and nobody is mid-run: hand the view back exactly as it was.
+		cam.CFrame = startCF
+		return false
 	end
 
 	function util.mouseTarget(): BasePart?
@@ -2286,7 +2609,13 @@ ui.slider(farmTab, "SwingDelay", {
 
 ui.toggle(farmTab, "HideMining", {
 	name = "Hide mining",
-	description = "Stands the character inside the rock where nobody can see it. The server only accepts swings within ~30 studs of a rock, so staying hidden and staying paid are the same spot.",
+	description = "Stands the character inside the rock where nobody can see it. The server only accepts swings within ~30 studs of a rock, so staying hidden and staying paid are the same spot. Default ON: visible mining was the source of the far-teleport complaints.",
+	value = true,
+})
+
+ui.toggle(farmTab, "BlackScreen", {
+	name = "Black screen",
+	description = "Veils the whole screen - game and menu - with black while the farm runs. Input still passes through, so the toggle stays clickable.",
 })
 
 ui.button(farmTab, {
@@ -2307,6 +2636,7 @@ ui.section(farmTab, "Wallet")
 local creditsStat = ui.stat(farmTab, { name = "Credits", value = util.credits() })
 local juiceStat = ui.stat(farmTab, { name = "MoonJuice on hand", value = util.juiceValue() })
 local farmStat = ui.stat(farmTab, { name = "Farm", value = "idle" })
+local converterStat = ui.stat(farmTab, { name = "Converters built", value = "..." })
 
 -- ESP --------------------------------------------------------------------
 ui.section(espTab, "Overlays")
@@ -2381,25 +2711,29 @@ ui.toggle(travelTab, "Fly", {
 })
 ui.slider(travelTab, "FlySpeed", {
 	name = "Fly speed",
-	range = { 0.5, 8 },
+	description = "Studs per second = value x 60. 8 is ~480/s.",
+	range = { 0.5, 16 },
 	increment = 0.5,
 	value = config.travel.flySpeed,
 })
 
 -- Combat -----------------------------------------------------------------
-ui.section(combatTab, "Fighting")
+ui.section(combatTab, "Keep distance")
 
-ui.toggle(combatTab, "AutoSwing", {
-	name = "Auto swing",
-	description = "Swing the best weapon at the closest monster in range.",
-})
 ui.toggle(combatTab, "Avoid", {
 	name = "Keep distance",
 	description = "Step away when a monster gets too close.",
 })
-ui.toggle(combatTab, "GodMode", {
-	name = "Damage guard",
-	description = "Blocks damage the client applies itself. Server damage cannot be cancelled from here.",
+
+ui.section(combatTab, "Gun mods")
+
+ui.toggle(combatTab, "GunRapid", {
+	name = "No cooldown",
+	description = "Refires the equipped Rail Gun / Rocket as fast as the server answers, skipping the client-side waits. You aim - the mod only removes the rate limit.",
+})
+ui.toggle(combatTab, "GunVolley", {
+	name = "Volley",
+	description = "Every rail shot sprays every monster in range instead of one. Server damage math is not client-writable, so this is the honest bigger-hitbox.",
 })
 
 -- Settings ---------------------------------------------------------------
@@ -2463,6 +2797,34 @@ local function applyFpsCap(v)
 	end
 end
 
+-- Black screen: a full-viewport veil above everything (Rayfield included).
+-- Frames are transparent to input unless Active, so the menu stays clickable
+-- underneath even while the screen looks dead.
+local blackGui: ScreenGui? = nil
+
+local function setBlackScreen(on: boolean)
+	if on then
+		if not blackGui then
+			local gui = Instance.new("ScreenGui")
+			gui.Name = "ParalyzBlackout"
+			gui.DisplayOrder = 9999999
+			gui.IgnoreGuiInset = true
+			gui.ResetOnSpawn = false
+			gui.Parent = game:GetService("CoreGui")
+			local frame = Instance.new("Frame")
+			frame.Name = "Veil"
+			frame.Size = UDim2.fromScale(1, 1)
+			frame.BackgroundColor3 = Color3.new(0, 0, 0)
+			frame.BorderSizePixel = 0
+			frame.Parent = gui
+			blackGui = gui
+		end
+		blackGui.Enabled = true
+	elseif blackGui then
+		blackGui.Enabled = false
+	end
+end
+
 state.on("AutoFarm", function()
 	farm.sync()
 end)
@@ -2493,14 +2855,17 @@ state.on("Fly", function()
 end)
 state.on("FlySpeed", applyFlySpeed)
 
-state.on("AutoSwing", function()
-	combat.sync()
-end)
 state.on("Avoid", function()
 	combat.sync()
 end)
-state.on("GodMode", function()
+state.on("GunRapid", function()
 	combat.sync()
+end)
+state.on("GunVolley", function()
+	combat.sync()
+end)
+state.on("BlackScreen", function(value)
+	setBlackScreen(value == true)
 end)
 
 state.on("NoRender", applyNoRender)
@@ -2512,6 +2877,19 @@ applySellAt(state.get("SellAt"))
 applySwingDelay(state.get("SwingDelay"))
 applyFlySpeed(state.get("FlySpeed"))
 applyFpsCap(state.get("FpsCap"))
+setBlackScreen(state.get("BlackScreen") == true)
+
+-- Hidden mining is the default way to farm (user decision): make it true on
+-- every boot unless the user turns it off during the session. Rayfield
+-- applies its autoLoad restore AFTER the menu exists, and the saved config
+-- still holds a false from the far-teleport debugging session, so the seed
+-- above can lose the race - re-assert once after the restore has landed.
+state.set("HideMining", true)
+task.delay(1.5, function()
+	if state.get("HideMining") ~= true then
+		state.set("HideMining", true)
+	end
+end)
 
 -- First sync: everything defaults off, this just primes the modules with the
 -- restored state (e.g. no-render was left on last session).
@@ -2541,6 +2919,10 @@ task.spawn(function()
 			if farmStat then
 				farmStat:Set(farm.isRunning() and farm.stats() or "idle")
 			end
+			if converterStat then
+				local list = util.converters()
+				converterStat:Set(#list > 0 and table.concat(list, ", ") or "none built")
+			end
 		end)
 		task.wait(2)
 	end
@@ -2553,6 +2935,12 @@ shutdown = function()
 	esp.stop()
 	travel.stop()
 	util.stopAim()
+	if blackGui then
+		pcall(function()
+			blackGui:Destroy()
+		end)
+		blackGui = nil
+	end
 	if window and not window.unloaded then
 		pcall(function()
 			window:Unload()

@@ -126,7 +126,13 @@ ui.slider(farmTab, "SwingDelay", {
 
 ui.toggle(farmTab, "HideMining", {
 	name = "Hide mining",
-	description = "Stands the character inside the rock where nobody can see it. The server only accepts swings within ~30 studs of a rock, so staying hidden and staying paid are the same spot.",
+	description = "Stands the character inside the rock where nobody can see it. The server only accepts swings within ~30 studs of a rock, so staying hidden and staying paid are the same spot. Default ON: visible mining was the source of the far-teleport complaints.",
+	value = true,
+})
+
+ui.toggle(farmTab, "BlackScreen", {
+	name = "Black screen",
+	description = "Veils the whole screen - game and menu - with black while the farm runs. Input still passes through, so the toggle stays clickable.",
 })
 
 ui.button(farmTab, {
@@ -147,6 +153,7 @@ ui.section(farmTab, "Wallet")
 local creditsStat = ui.stat(farmTab, { name = "Credits", value = util.credits() })
 local juiceStat = ui.stat(farmTab, { name = "MoonJuice on hand", value = util.juiceValue() })
 local farmStat = ui.stat(farmTab, { name = "Farm", value = "idle" })
+local converterStat = ui.stat(farmTab, { name = "Converters built", value = "..." })
 
 -- ESP --------------------------------------------------------------------
 ui.section(espTab, "Overlays")
@@ -221,25 +228,29 @@ ui.toggle(travelTab, "Fly", {
 })
 ui.slider(travelTab, "FlySpeed", {
 	name = "Fly speed",
-	range = { 0.5, 8 },
+	description = "Studs per second = value x 60. 8 is ~480/s.",
+	range = { 0.5, 16 },
 	increment = 0.5,
 	value = config.travel.flySpeed,
 })
 
 -- Combat -----------------------------------------------------------------
-ui.section(combatTab, "Fighting")
+ui.section(combatTab, "Keep distance")
 
-ui.toggle(combatTab, "AutoSwing", {
-	name = "Auto swing",
-	description = "Swing the best weapon at the closest monster in range.",
-})
 ui.toggle(combatTab, "Avoid", {
 	name = "Keep distance",
 	description = "Step away when a monster gets too close.",
 })
-ui.toggle(combatTab, "GodMode", {
-	name = "Damage guard",
-	description = "Blocks damage the client applies itself. Server damage cannot be cancelled from here.",
+
+ui.section(combatTab, "Gun mods")
+
+ui.toggle(combatTab, "GunRapid", {
+	name = "No cooldown",
+	description = "Refires the equipped Rail Gun / Rocket as fast as the server answers, skipping the client-side waits. You aim - the mod only removes the rate limit.",
+})
+ui.toggle(combatTab, "GunVolley", {
+	name = "Volley",
+	description = "Every rail shot sprays every monster in range instead of one. Server damage math is not client-writable, so this is the honest bigger-hitbox.",
 })
 
 -- Settings ---------------------------------------------------------------
@@ -303,6 +314,34 @@ local function applyFpsCap(v)
 	end
 end
 
+-- Black screen: a full-viewport veil above everything (Rayfield included).
+-- Frames are transparent to input unless Active, so the menu stays clickable
+-- underneath even while the screen looks dead.
+local blackGui: ScreenGui? = nil
+
+local function setBlackScreen(on: boolean)
+	if on then
+		if not blackGui then
+			local gui = Instance.new("ScreenGui")
+			gui.Name = "ParalyzBlackout"
+			gui.DisplayOrder = 9999999
+			gui.IgnoreGuiInset = true
+			gui.ResetOnSpawn = false
+			gui.Parent = game:GetService("CoreGui")
+			local frame = Instance.new("Frame")
+			frame.Name = "Veil"
+			frame.Size = UDim2.fromScale(1, 1)
+			frame.BackgroundColor3 = Color3.new(0, 0, 0)
+			frame.BorderSizePixel = 0
+			frame.Parent = gui
+			blackGui = gui
+		end
+		blackGui.Enabled = true
+	elseif blackGui then
+		blackGui.Enabled = false
+	end
+end
+
 state.on("AutoFarm", function()
 	farm.sync()
 end)
@@ -333,14 +372,17 @@ state.on("Fly", function()
 end)
 state.on("FlySpeed", applyFlySpeed)
 
-state.on("AutoSwing", function()
-	combat.sync()
-end)
 state.on("Avoid", function()
 	combat.sync()
 end)
-state.on("GodMode", function()
+state.on("GunRapid", function()
 	combat.sync()
+end)
+state.on("GunVolley", function()
+	combat.sync()
+end)
+state.on("BlackScreen", function(value)
+	setBlackScreen(value == true)
 end)
 
 state.on("NoRender", applyNoRender)
@@ -352,6 +394,19 @@ applySellAt(state.get("SellAt"))
 applySwingDelay(state.get("SwingDelay"))
 applyFlySpeed(state.get("FlySpeed"))
 applyFpsCap(state.get("FpsCap"))
+setBlackScreen(state.get("BlackScreen") == true)
+
+-- Hidden mining is the default way to farm (user decision): make it true on
+-- every boot unless the user turns it off during the session. Rayfield
+-- applies its autoLoad restore AFTER the menu exists, and the saved config
+-- still holds a false from the far-teleport debugging session, so the seed
+-- above can lose the race - re-assert once after the restore has landed.
+state.set("HideMining", true)
+task.delay(1.5, function()
+	if state.get("HideMining") ~= true then
+		state.set("HideMining", true)
+	end
+end)
 
 -- First sync: everything defaults off, this just primes the modules with the
 -- restored state (e.g. no-render was left on last session).
@@ -381,6 +436,10 @@ task.spawn(function()
 			if farmStat then
 				farmStat:Set(farm.isRunning() and farm.stats() or "idle")
 			end
+			if converterStat then
+				local list = util.converters()
+				converterStat:Set(#list > 0 and table.concat(list, ", ") or "none built")
+			end
 		end)
 		task.wait(2)
 	end
@@ -393,6 +452,12 @@ shutdown = function()
 	esp.stop()
 	travel.stop()
 	util.stopAim()
+	if blackGui then
+		pcall(function()
+			blackGui:Destroy()
+		end)
+		blackGui = nil
+	end
 	if window and not window.unloaded then
 		pcall(function()
 			window:Unload()

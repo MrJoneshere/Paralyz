@@ -34,9 +34,26 @@ return {
 		stallSwings = 10,
 		rockSwitchDelay = 20,
 
-		-- No rocks anywhere in the world: after this many empty waits the farm
-		-- teleports to another planet and lets the rocks stream in there.
+		-- No rocks anywhere near the character: after this many empty waits
+		-- the farm probes another planet.
 		planetWaits = 3,
+		-- Arriving somewhere: rocks stream in a few seconds after the
+		-- character lands, so after a teleport the farm waits this long for
+		-- the destination to load before deciding it is empty. Travel uses
+		-- the same wait to confirm a load.
+		loadWait = 15,
+		-- How far from the character rocks still count as "here". Rocks from
+		-- the previous planet linger while streaming out, and swinging at
+		-- them is pointless anyway (the server range rule), so every
+		-- proximity question filters by this.
+		streamRadius = 2500,
+		-- A planet that loaded empty goes on "not right now" for this long.
+		-- Never forever: content appears later as phases advance.
+		planetCooldown = 45,
+		-- Every planet in the world probed and found empty: pause this long
+		-- before starting another sweep instead of bouncing map-edge to
+		-- map-edge.
+		emptyPause = 30,
 	},
 
 	esp = {
@@ -61,17 +78,19 @@ return {
 	},
 
 	combat = {
-		-- Seconds between swings of the auto-attack.
-		swingDelay = 0.45,
-		-- How close a monster has to be before we swing at it.
-		swingRange = 18,
 		-- Keep-distance when Avoid is on: monsters inside this radius trigger a step back.
 		avoidRadius = 14,
+		-- Gun mods: refire cadence while a mod is armed, and the range the
+		-- volley sprays monsters at. Client-side only - server rate limits
+		-- and damage math are not writable from here.
+		gunDelay = 0.4,
+		gunRange = 800,
 	},
 
 	travel = {
-		-- Fly speed, studs per frame multiplier of the camera direction.
-		flySpeed = 2.5,
+		-- Fly speed, studs per second is this times 60: 8 -> ~480 studs/s,
+		-- which crosses the 10k-stud gaps between planets in a usable time.
+		flySpeed = 8,
 	},
 
 	perf = {

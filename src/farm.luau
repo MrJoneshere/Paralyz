@@ -50,14 +50,38 @@ return function(deps)
 
 	-- rocks on cooldown after a stall (rock -> release time)
 	local avoided: { [BasePart]: number } = {}
-	local lastPlanet: string? = nil
+	-- planets loaded but empty right now (name -> release time), and a pause
+	-- between full sweeps of the world (see rotatePlanet)
+	local planetCool: { [string]: number } = {}
+	local rotatePause = 0
 
-	local function report(msg: string)
-		if os.clock() - lastReport > 2 then
+	local function report(msg: string, force: boolean?)
+		-- Rotation lifecycle messages force their way through: hiding
+		-- "moving to X" behind the throttle made every run look like it
+		-- declared planets empty without ever going there.
+		if force or os.clock() - lastReport > 2 then
 			lastReport = os.clock()
 			util.notify("Auto-Farm", msg)
 		end
 	end
+
+	-- Live phase for the menu's stat line, so what the farm is doing is
+	-- visible continuously instead of only as fading toasts.
+	local phase = "idle"
+	local function setPhase(p: string)
+		phase = p
+	end
+
+	-- Travel teleports must move the hold with them: without this the
+	-- per-frame stance pin overwrites the teleport on the next frame, which
+	-- is why a manual teleport during a farm run appeared to do nothing
+	-- until it was spammed (it only landed when the rotation happened to
+	-- rewrite the hold).
+	util.onTeleport(function(cf)
+		if running then
+			holdCF = cf
+		end
+	end)
 
 	------------------------------------------------------------------ stance
 	local function hidden(): boolean
@@ -153,7 +177,10 @@ return function(deps)
 			end
 		end
 		local best, bestD
-		for _, rock in ipairs(util.rocks()) do
+		-- Only rocks that are actually streamed in around the character: the
+		-- previous planet's rocks linger in memory while they stream out, and
+		-- a stance at one of those would teleport the farm straight back.
+		for _, rock in ipairs(util.rocksNear(fromPos, config.farm.streamRadius)) do
 			if not avoided[rock] then
 				local d = util.dist(fromPos, rock.Position)
 				if not bestD or d < bestD then
@@ -179,42 +206,105 @@ return function(deps)
 		return false
 	end
 
-	-- No rocks anywhere: the character is out of stream range or the phase
-	-- has none. Move to another planet and let the rocks stream in.
-	local function rotatePlanet()
+	-- Probe planets one at a time, the way the map actually works: teleport,
+	-- WAIT for the destination to load (rocks spawn seconds after you arrive;
+	-- judging emptiness from far away - the old behaviour - just bounced the
+	-- farm across unloaded space until nothing was loaded anywhere), and only
+	-- then decide. Candidates are tried nearest-first, an empty planet cools
+	-- down instead of being re-probed forever, and cooled planets come back
+	-- later because content appears as phases advance. Returns true when the
+	-- character ended up somewhere with rocks.
+	-- Rotate with the hold: the per-frame stance hold would otherwise snap
+	-- the character straight back to the rock we just left, which made every
+	-- planet probe judge emptiness from the OLD position (and read to the
+	-- user as "it teleported me somewhere random"). The aim unbinds here
+	-- too - not a restore, just a free camera while travelling - and the
+	-- next rock re-aims on its own.
+	local function rotateTeleport(cf: CFrame)
+		util.stopAim()
+		holdCF = cf
+		local root = util.root()
+		if root then
+			root.CFrame = cf
+		end
+		util.teleported(cf)
+	end
+
+	local function rotatePlanet(): boolean
 		local root = util.root()
 		if not root then
-			return
+			return false
+		end
+		local now = os.clock()
+		for name, untilT in pairs(planetCool) do
+			if untilT <= now then
+				planetCool[name] = nil
+			end
 		end
 		local scan = util.planetScan()
 		if #scan == 0 then
-			return
+			setPhase("no planets visible - waiting")
+			report("no planets are loaded right now - waiting", true)
+			return false
 		end
-		table.sort(scan, function(a, b)
-			return a.rocks > b.rocks
-		end)
-		-- Prefer a planet that already shows rocks and is not where we just
-		-- looked, so repeated rotations keep making progress.
-		local target = nil
+		-- Planets we are already standing among: the emptiness is proven by
+		-- presence (the farm only rotates when nothing is loaded within
+		-- streamRadius), so cool them instead of probing ourselves again.
 		for _, p in ipairs(scan) do
-			if p.rocks > 0 and p.name ~= lastPlanet then
-				target = p
-				break
+			if util.dist(p.centre, root.Position) <= config.farm.streamRadius then
+				planetCool[p.name] = now + config.farm.planetCooldown
 			end
 		end
-		if not target then
+		table.sort(scan, function(a, b)
+			-- Live rock counts first (meaningful only for planets already
+			-- streamed in), then nearest: probing the closest unknown planet
+			-- beats hopping to the far edge of the map.
+			if (a.rocks > 0) ~= (b.rocks > 0) then
+				return a.rocks > 0
+			end
+			return util.dist(a.centre, root.Position) < util.dist(b.centre, root.Position)
+		end)
+
+		local tried = 0
+		local swept = false -- one full retry pass after clearing cooldowns
+		while running and tried < #scan do
+			local target = nil
 			for _, p in ipairs(scan) do
-				if p.name ~= lastPlanet then
+				if not planetCool[p.name] then
 					target = p
 					break
 				end
 			end
+			if not target then
+				if swept then
+					break
+				end
+				planetCool = {}
+				swept = true
+				continue
+			end
+			tried += 1
+			rotateTeleport(CFrame.new(util.dropToSurface(target.centre)))
+			setPhase("loading " .. target.name)
+			report("moving to " .. target.name .. " - going there to load it", true)
+			task.wait(1)
+			local n = util.settleRocks(target.centre, config.farm.loadWait, config.farm.streamRadius)
+			root = util.root()
+			if not root then
+				return false
+			end
+			if n > 0 then
+				-- Land precisely on the surface now that the load confirmed
+				-- rocks here, and pin the hold to the landing spot.
+				rotateTeleport(CFrame.new(util.dropToSurface(target.centre)))
+				setPhase("loaded " .. target.name)
+				report(target.name .. " loaded in person: " .. n .. " rocks", true)
+				return true
+			end
+			planetCool[target.name] = os.clock() + config.farm.planetCooldown
+			report(target.name .. ": went there, waited, empty for now - trying another planet", true)
 		end
-		target = target or scan[1]
-		lastPlanet = target.name
-		root.CFrame = CFrame.new(util.dropToSurface(target.centre))
-		report("no rocks anywhere - moving to " .. target.name)
-		task.wait(1)
+		return false
 	end
 
 	-- The auto-fix chain: swings go dead for no visible reason -> heal the
@@ -250,7 +340,8 @@ return function(deps)
 
 		cycles, gained, sold, fixes, switches = 0, 0, 0, 0, 0
 		avoided = {}
-		lastPlanet = nil
+		planetCool = {}
+		rotatePause = 0
 		local stall = 0 -- swings since the last juice
 		local fixStage = 0
 		local emptyWaits = 0
@@ -281,6 +372,7 @@ return function(deps)
 				break
 			end
 			if not util.alive() then
+				setPhase("waiting to respawn")
 				task.wait(1)
 				continue
 			end
@@ -307,14 +399,31 @@ return function(deps)
 
 			local rock = pickRock(root.Position)
 			if not rock then
-				if #util.rocks() > 0 and releaseOldestAvoided() then
+				local near = #util.rocksNear(root.Position, config.farm.streamRadius)
+				if near > 0 and releaseOldestAvoided() then
+					setPhase("freeing a stalled rock")
 					task.wait(1)
 					continue
 				end
 				emptyWaits += 1
+				setPhase("no rocks loaded here (" .. emptyWaits .. "/" .. config.farm.planetWaits .. ")")
 				if emptyWaits >= config.farm.planetWaits then
 					emptyWaits = 0
-					rotatePlanet()
+					if os.clock() >= rotatePause then
+						if rotatePlanet() then
+							rotatePause = 0
+						else
+							rotatePause = os.clock() + config.farm.emptyPause
+							report(
+								"probed every planet in person and all are empty - resting "
+									.. config.farm.emptyPause .. "s",
+								true
+							)
+							setPhase("resting - no planet has rocks")
+						end
+					else
+						setPhase("resting - no planet has rocks")
+					end
 				end
 				task.wait(config.farm.noRockDelay)
 				continue
@@ -339,17 +448,24 @@ return function(deps)
 			task.wait(config.farm.equipDelay)
 
 			-- Camera stand-off wider than the rock so the ray through the
-			-- cursor lands on its surface no matter where we stand.
+			-- cursor lands on its surface no matter where we stand. holdOnFail
+			-- keeps mid-run aim failures from snapping the view back and
+			-- forth; the release happens once, at stop.
 			local half = math.max(rock.Size.X, rock.Size.Y, rock.Size.Z) / 2
-			if not util.aimAt(rock.Position, half + 40) then
+			if not util.aimAt(rock.Position, half + 40, true) then
 				aimFails += 1
-				if aimFails % 10 == 0 then
-					report("aim cannot find the rock (" .. aimFails .. " tries)")
+				if aimFails % 6 == 0 then
+					-- Same spot from every basis keeps failing: leave this
+					-- rock instead of standing there aiming at nothing.
+					avoided[rock] = os.clock() + config.farm.rockSwitchDelay
+					switches += 1
+					report("camera cannot see this rock - moving to another")
 				end
 				task.wait(math.min(0.3 + aimFails * 0.2, 2))
 				continue
 			end
 			aimFails = 0
+			setPhase("mining")
 
 			-- Swing a batch, then re-evaluate: the aim may drift, the rock may
 			-- be gone, a test cap may be due.
@@ -375,7 +491,10 @@ return function(deps)
 				noteJuice()
 			end
 
-			util.stopAim()
+			-- NOTE: no stopAim here on purpose. The aim stays bound across
+			-- batches and simply rebinds to the next rock; releasing after
+			-- every batch was the lock/restore churn. stopAim happens at
+			-- loop end, on rotation, and in farm.stop.
 
 			-- Chain runs only after stallSwings dead swings; juice resets it.
 			if running and stall >= config.farm.stallSwings then
@@ -394,6 +513,7 @@ return function(deps)
 		util.stopAim()
 		stopHold()
 		restoreCollision()
+		setPhase("stopped")
 		running = false
 	end
 
@@ -404,6 +524,7 @@ return function(deps)
 		end
 		running = true
 		cycles, gained, sold, fixes, switches = 0, 0, 0, 0, 0
+		setPhase("starting")
 		thread = task.spawn(runLoop, opts)
 		return true
 	end
@@ -422,11 +543,12 @@ return function(deps)
 
 	function farm.stats(): string
 		return string.format(
-			"%d swings · %d juice · %d sold · %d fixes",
+			"%d swings · %d juice · %d sold · %d fixes · %s",
 			cycles,
 			gained,
 			sold,
-			fixes + switches
+			fixes + switches,
+			phase
 		)
 	end
 
