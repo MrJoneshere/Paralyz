@@ -21,7 +21,7 @@ While the repo is still **private**, HttpGet cannot read it, so use the bundled 
 | `loader.luau` | Entry point: fetches modules, builds the Rayfield window, wires every element through `state` |
 | `src/config.luau` | Every tunable, in one place. Data only. |
 | `src/state.luau` | The single owner of every value the menu shows |
-| `src/ui.luau` | Defensive wrappers over Rayfield Gen2 elements, bound to state keys |
+| `src/ui.luau` | Defensive wrappers over Rayfield Gen2 elements, bound to state keys (Gen2's `Stat:Set` is numbers-only — word readouts go on `CreateText` cards via `ui.text`) |
 | `src/util.luau` | Character, tool, juice, rock and camera-aim helpers |
 | `src/perf.luau` | No-render mode (quality, shadows, post effects, FPS cap) |
 | `src/esp.luau` | Highlight-pool ESP (capped per layer) + one optional label |
