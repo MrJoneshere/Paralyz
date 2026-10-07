@@ -250,6 +250,16 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
   the flat floor while `gained==0` (the stuck-pickaxe signature). Measured after the change:
   **3 fixes / 111 swings** (was 10 / 150), zero false fixes after the first juice, run ~26%
   faster.
+- **Mars (Planet4) experiment (2026-10-07):** rocks are `MarsRocks`, they drop **plain
+  `MoonJuice=15`** (no ion), yield ~17 swings/stack → **~0.88 credits/swing - worse than the
+  Moon (12 swings, 1.25) and far worse than Venus ion (30 swings, 2.5)**. Selling Mars-mined
+  juice fills **no pool** (mars=0 global=0 after 4 verified sells) - consistent with the
+  pump-fed-only measurement. Mars's `MoonJuiceMars` sits at 0 with **no pump-type Mars building
+  in the buy map** (PlutoColony 300 / Expanded 500 / Main 700 / Phobos 500 / MarsDomes 400 /
+  TerraformPluto 800 / Terraform 1000 - all gated on a pool that never refills), so **Mars
+  buildings are blocked until a refill source appears** (another player, or a pump we have not
+  found). Do not re-stage Mars buys blindly - wait for `MoonJuiceMars > 0` first. Farm
+  economics ranking: **Venus ion (2.5/swing, needs AutoConvert) > Moon (1.25) > Mars (0.88)**.
 - **MoonJuiceTank pickups** (`Workspace.Unanchored`, attr `MoonJuiceTank=true`, ~35 lying around,
   kids = LocalScript + Beam + Attachment + `Credits` NumberValue): their LocalScript equips a
   Beam to `Workspace.City.Nuke.Frame.Refuel.Attachment` - tanks fuel the Nuke. **They carry NO
@@ -266,6 +276,12 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
   story threat - live children: `Io, Saturn, Jupiter, Jupiter2, Neptune, EnragedNeptune, Mars,
   Sun, BlackHole, Planet9`. Each carries attributes **`WarpActive` (bool), `WarpTime` (seconds),
   `WarpStart` (server epoch)**; arrival ETA = `WarpStart + WarpTime - GetServerTimeNow()`.
+  **Warps chain**: observed live - while Io was still approaching (700s cycle), `Jupiter2`
+  flipped `false/nil/nil -> true/100/<epoch>` (a fresh 100s countdown). The Io arrival itself:
+  players gather at the hub (14/21 within 300 studs), `Shockwave2` impact VFX, `Values.Fuel`
+  drained `75 -> -inf -> 0`, and the event moved our character 16k studs. **The farm now
+  protects against this** (external-move detection, see farm section). `Rail`/`Effect`
+  top-level VFX flash in/out continuously at the hub (players rail-gunning + event effects).
   `PlayerGui.ProgressBar.ProgressBarController` renders the nearest active one (ETA + progress
   bar, "No incoming planets" when idle, "Too Far From The Tracker!" beyond range of the
   physical tracker). Observed live: `Io WarpActive=true, WarpTime=700` (11.7 min cycle, ~4.5
