@@ -28,9 +28,13 @@ return {
 		maxRange = 26,
 		hideOffset = 4,
 
-		-- Auto-fix chain, in order, after stallSwings swings with no juice:
-		-- 1) re-equip the pickaxe, 2) switch to another rock, 3) settle-wait.
-		-- Any juice resets the chain.
+		-- Auto-fix chain, in order, when swings go dead: 1) re-equip the
+		-- pickaxe, 2) switch to another rock, 3) settle-wait. Any juice
+		-- resets the chain. stallSwings is the floor: a run producing juice
+		-- scales the threshold to 1.5x the observed swings-per-juice, so a
+		-- healthy slow vein (ion on Venus, ~1 per 30 swings) does not read
+		-- as a dead tool, while a run with no juice at all - the stuck
+		-- pickaxe signature - still fixes at the flat floor.
 		stallSwings = 10,
 		rockSwitchDelay = 20,
 

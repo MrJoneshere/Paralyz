@@ -339,9 +339,13 @@ return {
 		maxRange = 26,
 		hideOffset = 4,
 
-		-- Auto-fix chain, in order, after stallSwings swings with no juice:
-		-- 1) re-equip the pickaxe, 2) switch to another rock, 3) settle-wait.
-		-- Any juice resets the chain.
+		-- Auto-fix chain, in order, when swings go dead: 1) re-equip the
+		-- pickaxe, 2) switch to another rock, 3) settle-wait. Any juice
+		-- resets the chain. stallSwings is the floor: a run producing juice
+		-- scales the threshold to 1.5x the observed swings-per-juice, so a
+		-- healthy slow vein (ion on Venus, ~1 per 30 swings) does not read
+		-- as a dead tool, while a run with no juice at all - the stuck
+		-- pickaxe signature - still fixes at the flat floor.
 		stallSwings = 10,
 		rockSwitchDelay = 20,
 
@@ -1377,8 +1381,17 @@ return function(deps)
 			-- every batch was the lock/restore churn. stopAim happens at
 			-- loop end, on rotation, and in farm.stop.
 
-			-- Chain runs only after stallSwings dead swings; juice resets it.
-			if running and stall >= config.farm.stallSwings then
+			-- Chain runs only after the swings go dead; juice resets it. A
+			-- flat 10 reads as "broken" on a healthy slow vein - ion on
+			-- Venus drops ~1 per 30 swings, which fired ~10 false fixes per
+			-- 150 swings (each a reequip + churn). Scale the threshold with
+			-- the run's observed swings-per-juice instead. No juice at all
+			-- - the stuck-pickaxe signature - keeps the fast flat floor.
+			local stallLimit = config.farm.stallSwings
+			if gained >= 1 then
+				stallLimit = math.max(stallLimit, math.ceil((cycles / gained) * 1.5))
+			end
+			if running and stall >= stallLimit then
 				fixStage = fixStage + 1
 				if fixStage > 3 then
 					fixStage = 1

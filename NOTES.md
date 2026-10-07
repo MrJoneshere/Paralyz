@@ -218,10 +218,16 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
   "1 ION MOONJUICE = 1 ANTI MATTER MOONJUICE", "ANTI MOON JUICE IS WORTH …". So the chain is
   juice → (ion source, unresolved) → insert prompt → Anti Matter juice → sell (our `sellAll`
   already sells any `Credits`-valued tool generically).
-- Ion source still unresolved: the ion buildings are *bought*, not converted —
+- Ion source **RESOLVED and both buildings PAID for** (2026-10-07): the buys are
   `Events.Buy("IonMoonPumper","Building",800,"Venus")` (button `IonizedMoonJuicePumpJack`) and
   `Events.Buy("IonMoonJuicePumpJack","Building",850,"Venus")` (button `MercIonMoonPumpJack`), both
-  in `VenusController`, both gated on `workspace.VenusCity` + `Values.MoonJuiceVenus >= cost`.
+  in `VenusController`, both gated on `Values.MoonJuiceVenus >= cost` (staged-buy jobs observed
+  `800->9` and `864->26` - PAID). **The ion juice itself does not come from the buildings**: it
+  comes from mining **Planet5** rocks, which drop `Ionized MoonJuice` stacks (`Credits=20`).
+  Planet5 is effectively Venus's rock field (ion-only drops); the Moon (Planet1) drops plain
+  juice. `VenusCity` itself is a streamed top-level model (`StreamingEnabled=true`) - when it is
+  out of range `travel.to("Venus City")` falls back to another hub destination, and the partless
+  ion tanks' `GetPivot` returns a meaningless spot (empty void, nothing loads there).
 - EarthController buy buttons (FriendIndustries, MoonJuice): `Nuke` 200, `ANuke` 300 (button
   misleadingly named `AntiMatter`), `PluckRadar` 400, `VenusColony` 300, `RecoverEarth` 1200,
   `SpaceStation` 500, plus `ForceField`.
@@ -232,6 +238,18 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
   `AutoConvert`, default on): detect ion stacks by name → hold-aware teleport to the machine →
   one verified hold per stack (aborts if a hold consumes nothing) → `sellAll` picks up the
   anti-matter tools (they carry `Credits`).
+- **Full converter chain verified end to end (2026-10-07, capped run on Planet5):** farm mined
+  `Ionized MoonJuice` → at threshold `convertIon` teleported to the SpaceStation machine, held the
+  prompt per stack, sold the anti-matter: **4 stacks = +296 credits (74/stack)** vs 20/stack raw
+  ion vs 15/stack plain Moon juice. Economics per swing: Moon plain 15/12 ≈ 1.25, Venus ion
+  74/30 ≈ **2.5 → ion mining is ~2× the Moon's income per swing** (ion drops ~1 per 30 swings
+  vs 12). Venus (Planet5) is the better farm target whenever AutoConvert is on.
+- **Yield-aware auto-fix (2026-10-07):** the flat `stallSwings=10` false-fired ~10 times per
+  150 swings on Venus's slow ion vein. The chain threshold now scales to
+  `max(stallSwings, 1.5 × observed swings-per-juice)` once the run has produced juice, keeping
+  the flat floor while `gained==0` (the stuck-pickaxe signature). Measured after the change:
+  **3 fixes / 111 swings** (was 10 / 150), zero false fixes after the first juice, run ~26%
+  faster.
 - **MoonJuiceTank pickups** (`Workspace.Unanchored`, attr `MoonJuiceTank=true`, ~35 lying around,
   kids = LocalScript + Beam + Attachment + `Credits` NumberValue): their LocalScript equips a
   Beam to `Workspace.City.Nuke.Frame.Refuel.Attachment` - tanks fuel the Nuke. **They carry NO
