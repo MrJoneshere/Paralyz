@@ -98,9 +98,11 @@ Consequences the code respects:
   Fuel climbs** (`MoonJuiceMars 0 → 349`, `MoonJuiceVenus 0 → ~400` in one cycle); during Fuel=0
   stretches pools sit still or creep (global ~0.2/s, Venus ~1/s after recovery). So a pool stuck
   at 0 is *phase-gated*, not dead — watch Fuel before concluding a planet is unbuyable.
-- **A round restart wipes everything economy-side** (measured on the restart the watcher caught,
-  2026-10-07): every `Values.*` pool → 0, `Fuel` → 0, and all bought buildings gone (SpaceStation,
-  VenusCity, pumps, colonies) — only `City, SpawnLocation, FriendIndustries` stood afterwards.
+- **A round restart wipes everything economy-side** (measured across the restarts the watcher
+  caught, 2026-10-07): every `Values.*` pool → 0, `Fuel` → 0, all bought buildings gone
+  (SpaceStation, VenusCity, pumps, colonies) — only `City, SpawnLocation, FriendIndustries`
+  stood afterwards — **and the carried juice stack is lost** (3 held stacks vanished while
+  credits stayed exactly put). That is why the round-end dump exists at all.
   Round length is **not** constant: restarts were measured at `ClientSeconds` 2854, 3527 and 2211.
 - Fuel was seen climbing past the old 100 mark (`110, 130, 150` after that restart) — treat 100 as
   "Nuke ready", not a hard cap.
