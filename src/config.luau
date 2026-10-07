@@ -14,14 +14,29 @@ return {
 		aimDistance = 35,
 		-- Sell once this many MoonJuice stacks are sitting in the Backpack.
 		sellAt = 10,
-		-- Rocks spawn in waves: when the folders are empty, wait this long and look again.
+		-- Rocks stream by proximity and in waves: when the folders are empty,
+		-- wait this long and look again.
 		noRockDelay = 4,
 		-- Grace after equipping a tool before the first swing.
 		equipDelay = 0.25,
-		-- How far past a rock's edge to stand while swinging it.
-		edgeMargin = 14,
-		-- Hard stop for test runs. The GUI never passes this; only tests do.
-		testCycles = 5,
+
+		-- Stance geometry. Measured: the server drops a swing made from more
+		-- than ~30 studs of the rock's centre (30 accepted, 37 rejected) and
+		-- never rolls the character back, so every stance stays inside
+		-- maxRange. The "Hide mining" menu toggle switches from standing on
+		-- top of the rock to standing inside its mesh, invisible to others.
+		maxRange = 26,
+		hideOffset = 4,
+
+		-- Auto-fix chain, in order, after stallSwings swings with no juice:
+		-- 1) re-equip the pickaxe, 2) switch to another rock, 3) settle-wait.
+		-- Any juice resets the chain.
+		stallSwings = 10,
+		rockSwitchDelay = 20,
+
+		-- No rocks anywhere in the world: after this many empty waits the farm
+		-- teleports to another planet and lets the rocks stream in there.
+		planetWaits = 3,
 	},
 
 	esp = {
@@ -29,8 +44,14 @@ return {
 		monsters = true,
 		juice = true,
 		rocks = false,
+		labels = true, -- the single nearest-target name label
+		throughWalls = true, -- Highlight depth mode: AlwaysOnTop vs Occluded
 		maxDistance = 3000,
-		refresh = 0.10, -- seconds between scans of the world (labels redraw every frame)
+		refresh = 0.25, -- seconds between scans; Highlights follow targets for free
+		fill = 0.72, -- Highlight fill transparency (1 = invisible)
+		outline = 0.0, -- Highlight outline transparency
+		-- Per-layer caps: the pool can never grow past the sum of these.
+		limits = { players = 16, monsters = 16, juice = 20, rocks = 30 },
 		colors = {
 			player = Color3.fromRGB(120, 170, 255),
 			monster = Color3.fromRGB(255, 96, 96),

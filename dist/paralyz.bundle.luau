@@ -7,7 +7,7 @@
 -- Loadstring one-liner (once the repo is public):
 --   loadstring(game:HttpGet("https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/loader.luau"))()
 
-local VERSION = "0.1.0"
+local VERSION = "0.2.0"
 local BASE = "https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/src/"
 
 -- The bundler replaces this line with a literal table of module sources.
@@ -244,14 +244,29 @@ return {
 		aimDistance = 35,
 		-- Sell once this many MoonJuice stacks are sitting in the Backpack.
 		sellAt = 10,
-		-- Rocks spawn in waves: when the folders are empty, wait this long and look again.
+		-- Rocks stream by proximity and in waves: when the folders are empty,
+		-- wait this long and look again.
 		noRockDelay = 4,
 		-- Grace after equipping a tool before the first swing.
 		equipDelay = 0.25,
-		-- How far past a rock's edge to stand while swinging it.
-		edgeMargin = 14,
-		-- Hard stop for test runs. The GUI never passes this; only tests do.
-		testCycles = 5,
+
+		-- Stance geometry. Measured: the server drops a swing made from more
+		-- than ~30 studs of the rock's centre (30 accepted, 37 rejected) and
+		-- never rolls the character back, so every stance stays inside
+		-- maxRange. The "Hide mining" menu toggle switches from standing on
+		-- top of the rock to standing inside its mesh, invisible to others.
+		maxRange = 26,
+		hideOffset = 4,
+
+		-- Auto-fix chain, in order, after stallSwings swings with no juice:
+		-- 1) re-equip the pickaxe, 2) switch to another rock, 3) settle-wait.
+		-- Any juice resets the chain.
+		stallSwings = 10,
+		rockSwitchDelay = 20,
+
+		-- No rocks anywhere in the world: after this many empty waits the farm
+		-- teleports to another planet and lets the rocks stream in there.
+		planetWaits = 3,
 	},
 
 	esp = {
@@ -259,8 +274,14 @@ return {
 		monsters = true,
 		juice = true,
 		rocks = false,
+		labels = true, -- the single nearest-target name label
+		throughWalls = true, -- Highlight depth mode: AlwaysOnTop vs Occluded
 		maxDistance = 3000,
-		refresh = 0.10, -- seconds between scans of the world (labels redraw every frame)
+		refresh = 0.25, -- seconds between scans; Highlights follow targets for free
+		fill = 0.72, -- Highlight fill transparency (1 = invisible)
+		outline = 0.0, -- Highlight outline transparency
+		-- Per-layer caps: the pool can never grow past the sum of these.
+		limits = { players = 16, monsters = 16, juice = 20, rocks = 30 },
 		colors = {
 			player = Color3.fromRGB(120, 170, 255),
 			monster = Color3.fromRGB(255, 96, 96),
@@ -292,10 +313,15 @@ return {
 	["esp"] = [==[
 --!strict
 -- Paralyz / src/esp.luau
--- Drawing-library overlays: players, monsters, juice tanks and rocks.
+-- Highlight-based ESP with one optional label.
 --
--- Uses Camera:WorldToViewportPoint (WorldToScreenPoint is wrong for Drawing),
--- refreshes targets on a slow scan interval, and redraws labels every frame.
+-- Kept deliberately boring so it cannot tank a weak GPU:
+--   * A pool of Highlight instances capped per layer (config.esp.limits).
+--     Highlights are assigned on a slow scan and then cost nothing per
+--     frame - Roblox follows the adornee on its own, no redraw loop.
+--   * One Drawing label, repositioned every frame to the nearest
+--     on-screen target. That is the only per-frame work.
+--   * Nothing survives: stop destroys the pool and the folder.
 
 return function(deps)
 	local config = deps.config
@@ -307,16 +333,257 @@ return function(deps)
 	local RunService = util.RunService
 	local esp = {}
 
-	------------------------------------------------------------------ labels
-	local label = nil
 	local enabled = false
 
-	local function makeLabel()
-		if label then
-			return label
+	-- The single label: text object plus the entries it may pick from.
+	local label = nil
+	local labelTargets = {}
+
+	------------------------------------------------------------- highlights
+	local folder: Folder? = nil
+	local pool: { Highlight } = {}
+
+	local totalLimit = config.esp.limits.players
+		+ config.esp.limits.monsters
+		+ config.esp.limits.juice
+		+ config.esp.limits.rocks
+
+	local function ensureFolder(): Folder
+		if folder and folder.Parent then
+			return folder
 		end
-		if not DrawingAny then
-			return nil
+		local f = Instance.new("Folder")
+		f.Name = "ParalyzESP"
+		f.Parent = workspace
+		folder = f
+		return f
+	end
+
+	local function destroyPool()
+		for _, hl in ipairs(pool) do
+			pcall(function()
+				hl:Destroy()
+			end)
+		end
+		pool = {}
+		if folder then
+			pcall(function()
+				folder:Destroy()
+			end)
+			folder = nil
+		end
+	end
+
+	-- One pass: hand each live entry the next pooled Highlight, park the
+	-- rest. Entries arrive nearest-first and already capped per layer, so
+	-- the nearest targets always win a slot.
+	local function applyScan(layers)
+		local f = ensureFolder()
+		local depth = if config.esp.throughWalls
+			then Enum.HighlightDepthMode.AlwaysOnTop
+			else Enum.HighlightDepthMode.Occluded
+		local idx = 1
+		for _, layer in ipairs(layers) do
+			for _, e in ipairs(layer.entries) do
+				if idx > totalLimit then
+					break
+				end
+				if idx > #pool then
+					local hl = Instance.new("Highlight")
+					hl.Name = "ParalyzESP"
+					hl.Parent = f
+					table.insert(pool, hl)
+				end
+				local hl = pool[idx]
+				hl.Adornee = e.inst
+				hl.FillColor = e.color
+				hl.OutlineColor = e.color
+				hl.FillTransparency = config.esp.fill
+				hl.OutlineTransparency = config.esp.outline
+				hl.DepthMode = depth
+				hl.Enabled = true
+				idx += 1
+			end
+		end
+		for i = idx, #pool do
+			pool[i].Enabled = false
+			pool[i].Adornee = nil
+		end
+	end
+
+	--------------------------------------------------------------- scanning
+	-- Entries: { inst, pos, text, color, d } nearest-first, capped.
+
+	local function origin(): Vector3
+		local root = util.root()
+		return root and root.Position or Vector3.zero
+	end
+
+	local function slice(list, cap)
+		for i = #list, cap + 1, -1 do
+			table.remove(list, i)
+		end
+		return list
+	end
+
+	local function scanPlayers()
+		local out = {}
+		local o = origin()
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player ~= Players.LocalPlayer then
+				local char = player.Character
+				local hum = char and char:FindFirstChildOfClass("Humanoid")
+				local root = char and char:FindFirstChild("HumanoidRootPart")
+				if char and root and hum and (hum :: Humanoid).Health > 0 then
+					local d = util.dist(o, (root :: BasePart).Position)
+					if d <= config.esp.maxDistance then
+						table.insert(out, {
+							inst = char,
+							pos = (root :: BasePart).Position,
+							text = string.format(
+								"%s  %d/%d  [%dm]",
+								player.DisplayName,
+								math.floor((hum :: Humanoid).Health),
+								math.floor((hum :: Humanoid).MaxHealth),
+								math.floor(d)
+							),
+							color = config.esp.colors.player,
+							d = d,
+						})
+					end
+				end
+			end
+		end
+		table.sort(out, function(a, b)
+			return a.d < b.d
+		end)
+		return slice(out, config.esp.limits.players)
+	end
+
+	local function scanMonsters()
+		local out = {}
+		local o = origin()
+		for _, model in ipairs(util.aliveMonsters()) do
+			local pivot = model:GetPivot().Position
+			local d = util.dist(o, pivot)
+			if d <= config.esp.maxDistance then
+				local hum = model:FindFirstChildOfClass("Humanoid")
+				table.insert(out, {
+					inst = model,
+					pos = pivot,
+					text = string.format(
+						"%s  %d  [%dm]",
+						model.Name,
+						math.floor(hum and hum.Health or 0),
+						math.floor(d)
+					),
+					color = config.esp.colors.monster,
+					d = d,
+				})
+			end
+		end
+		table.sort(out, function(a, b)
+			return a.d < b.d
+		end)
+		return slice(out, config.esp.limits.monsters)
+	end
+
+	-- MoonJuice tanks lying around the world (tools under Workspace.Unanchored).
+	local function scanJuice()
+		local out = {}
+		local o = origin()
+		local unanchored = workspace:FindFirstChild("Unanchored")
+		if not unanchored then
+			return out
+		end
+		for _, inst in ipairs(unanchored:GetChildren()) do
+			if inst:IsA("Tool") and inst:FindFirstChild("Credits") then
+				local part = inst:FindFirstChildWhichIsA("BasePart", true)
+				if part then
+					local d = util.dist(o, (part :: BasePart).Position)
+					if d <= config.esp.maxDistance then
+						local credits = inst:FindFirstChild("Credits")
+						table.insert(out, {
+							inst = part :: BasePart,
+							pos = (part :: BasePart).Position,
+							text = string.format(
+								"Juice %d [%dm]",
+								math.floor(credits and (credits :: NumberValue).Value or 0),
+								math.floor(d)
+							),
+							color = config.esp.colors.juice,
+							d = d,
+						})
+					end
+				end
+			end
+		end
+		table.sort(out, function(a, b)
+			return a.d < b.d
+		end)
+		return slice(out, config.esp.limits.juice)
+	end
+
+	local function scanRocks()
+		local out = {}
+		local o = origin()
+		for _, rock in ipairs(util.minableRocks()) do
+			local d = util.dist(o, rock.Position)
+			if d <= config.esp.maxDistance then
+				table.insert(out, {
+					inst = rock,
+					pos = rock.Position,
+					text = string.format("Rock [%dm]", math.floor(d)),
+					color = config.esp.colors.rock,
+					d = d,
+				})
+			end
+		end
+		table.sort(out, function(a, b)
+			return a.d < b.d
+		end)
+		return slice(out, config.esp.limits.rocks)
+	end
+
+	local function scan()
+		local layers = {}
+		local merged = {}
+		if state.enabled("ESPPlayers") then
+			local entries = scanPlayers()
+			table.insert(layers, { entries = entries })
+			for _, e in ipairs(entries) do
+				table.insert(merged, e)
+			end
+		end
+		if state.enabled("ESPMonsters") then
+			local entries = scanMonsters()
+			table.insert(layers, { entries = entries })
+			for _, e in ipairs(entries) do
+				table.insert(merged, e)
+			end
+		end
+		if state.enabled("ESPJuice") then
+			local entries = scanJuice()
+			table.insert(layers, { entries = entries })
+			for _, e in ipairs(entries) do
+				table.insert(merged, e)
+			end
+		end
+		if state.enabled("ESPRocks") then
+			local entries = scanRocks()
+			table.insert(layers, { entries = entries })
+			for _, e in ipairs(entries) do
+				table.insert(merged, e)
+			end
+		end
+		applyScan(layers)
+		labelTargets = merged
+	end
+
+	------------------------------------------------------------------ label
+	local function ensureLabel()
+		if label or not DrawingAny then
+			return label
 		end
 		local ok, made = pcall(function()
 			return DrawingAny.new("Text")
@@ -333,170 +600,37 @@ return function(deps)
 		return label
 	end
 
-	-- Each target type resolves to { pos, text, color, priority }.
-	local function scanPlayers()
-		local out = {}
-		local myRoot = util.root()
-		local origin = myRoot and myRoot.Position or Vector3.zero
-		for _, player in ipairs(Players:GetPlayers()) do
-			if player ~= Players.LocalPlayer then
-				local char = player.Character
-				local hum = char and char:FindFirstChildOfClass("Humanoid")
-				local root = char and char:FindFirstChild("HumanoidRootPart")
-				if char and root and hum and hum.Health > 0 then
-					local pos = (root :: BasePart).Position
-					local d = util.dist(origin, pos)
-					if d <= config.esp.maxDistance then
-						table.insert(out, {
-							pos = pos,
-							text = string.format(
-								"%s  %d/%d  [%dm]",
-								player.DisplayName,
-								math.floor(hum.Health),
-								math.floor(hum.MaxHealth),
-								math.floor(d)
-							),
-							color = config.esp.colors.player,
-						})
-					end
-				end
-			end
-		end
-		return out
-	end
-
-	local function scanMonsters()
-		local out = {}
-		local myRoot = util.root()
-		local origin = myRoot and myRoot.Position or Vector3.zero
-		for _, model in ipairs(util.aliveMonsters()) do
-			local pos = model:GetPivot().Position
-			local d = util.dist(origin, pos)
-			if d <= config.esp.maxDistance then
-				local hum = model:FindFirstChildOfClass("Humanoid")
-				table.insert(out, {
-					pos = pos,
-					text = string.format(
-						"%s  %d  [%dm]",
-						model.Name,
-						math.floor(hum and hum.Health or 0),
-						math.floor(d)
-					),
-					color = config.esp.colors.monster,
-				})
-			end
-		end
-		return out
-	end
-
-	-- MoonJuice tanks lying around the world (tools under Workspace.Unanchored).
-	local function scanJuice()
-		local out = {}
-		local myRoot = util.root()
-		local origin = myRoot and myRoot.Position or Vector3.zero
-		local unanchored = workspace:FindFirstChild("Unanchored")
-		if not unanchored then
-			return out
-		end
-		for _, inst in ipairs(unanchored:GetChildren()) do
-			if inst:IsA("Tool") and inst:FindFirstChild("Credits") then
-				local part = inst:FindFirstChildWhichIsA("BasePart", true)
-				if part then
-					local pos = (part :: BasePart).Position
-					local d = util.dist(origin, pos)
-					if d <= config.esp.maxDistance then
-						local credits = inst:FindFirstChild("Credits")
-						table.insert(out, {
-							pos = pos,
-							text = string.format(
-								"Juice %d [%dm]",
-								math.floor(credits and (credits :: NumberValue).Value or 0),
-								math.floor(d)
-							),
-							color = config.esp.colors.juice,
-						})
-					end
-				end
-			end
-		end
-		return out
-	end
-
-	local function scanRocks()
-		local out = {}
-		local myRoot = util.root()
-		local origin = myRoot and myRoot.Position or Vector3.zero
-		for _, rock in ipairs(util.minableRocks()) do
-			local d = util.dist(origin, rock.Position)
-			if d <= config.esp.maxDistance then
-				table.insert(out, {
-					pos = rock.Position,
-					text = string.format("Rock [%dm]", math.floor(d)),
-					color = config.esp.colors.rock,
-				})
-			end
-		end
-		return out
-	end
-
-	--------------------------------------------------------------- scan loop
-	local targets = {}
-	local scanConn: RBXScriptConnection? = nil
-
-	local function scan()
-		-- Merge all enabled layers into one list; nearest wins the label.
-		local list = {}
-		if state.enabled("ESPPlayers") then
-			for _, t in ipairs(scanPlayers()) do
-				table.insert(list, t)
-			end
-		end
-		if state.enabled("ESPMonsters") then
-			for _, t in ipairs(scanMonsters()) do
-				table.insert(list, t)
-			end
-		end
-		if state.enabled("ESPJuice") then
-			for _, t in ipairs(scanJuice()) do
-				table.insert(list, t)
-			end
-		end
-		if state.enabled("ESPRocks") then
-			for _, t in ipairs(scanRocks()) do
-				table.insert(list, t)
-			end
-		end
-		targets = list
-	end
-
-	--------------------------------------------------------------- draw loop
+	--------------------------------------------------------------- run loop
+	local scanConn: thread? = nil
 	local drawConn: RBXScriptConnection? = nil
 
 	local function start()
 		if drawConn then
 			return
 		end
-		local text = makeLabel()
-		if not text then
-			enabled = false -- nothing to draw with; let the next sync retry
-			return
-		end
+		ensureLabel()
 
 		drawConn = RunService.RenderStepped:Connect(function()
+			local text = label
+			if not text then
+				return
+			end
+			if not state.enabled("ESPLabels") then
+				text.Visible = false
+				return
+			end
 			local cam = workspace.CurrentCamera
 			if not cam then
 				text.Visible = false
 				return
 			end
 
-			-- Pick the closest visible target and label just that one: one label
-			-- keeps the overlay cheap on a GPU that is already at its limit.
+			-- Nearest on-screen target wins the single label.
 			local best, bestScreen
-			for _, t in ipairs(targets) do
+			for _, t in ipairs(labelTargets) do
 				local screen, onScreen = cam:WorldToViewportPoint(t.pos)
 				if onScreen and screen.Z > 0 then
-					local d = screen.Z
-					if not bestScreen or d < bestScreen.Z then
+					if not bestScreen or screen.Z < bestScreen.Z then
 						best, bestScreen = t, screen
 					end
 				end
@@ -526,15 +660,14 @@ return function(deps)
 			drawConn = nil
 		end
 		if scanConn then
-			-- The scan loop exits by itself once `enabled` goes false; cancel only
-			-- matters if it is somehow still alive.
 			pcall(task.cancel, scanConn)
 			scanConn = nil
 		end
 		if label then
 			label.Visible = false
 		end
-		targets = {}
+		labelTargets = {}
+		destroyPool()
 	end
 
 	-- Single switch the menu drives.
@@ -564,17 +697,30 @@ end
 	["farm"] = [==[
 --!strict
 -- Paralyz / src/farm.luau
--- Auto-farm: aim at a rock, swing the pickaxe, collect MoonJuice, sell.
+-- Auto-farm: hold a stance inside the rock's mining range, swing, collect
+-- MoonJuice, sell.
 --
--- Confirmed behaviour of the game:
---   1. Aim the camera so Mouse.Target is a part in a planet's Rocks folder.
---   2. Tool:Activate() sends the swing.
---   3. The server answers on Events.Pickaxe (OnClientEvent) and the game's own
---      PickaxeController fires back FireServer(mouse.Target).
---   4. A MoonJuice Tool with a Credits NumberValue shows up in the Backpack.
---   5. Events.SellMoonjuice:FireServer(count, true) sells everything.
+-- What the server enforces (measured 2026-10-07 with a binary search):
+--   * A swing only pays out while the character is within ~30 studs of the
+--     targeted rock's centre: 30 accepted, 37 rejected. Farther out the
+--     swing is silently dropped - aim, Tool.Activated and the server's own
+--     Pickaxe ask all fire, but no juice ever appears.
+--   * The character's POSITION is never rolled back, only the swing is
+--     dropped, so a per-frame CFrame hold keeps any stance stable.
+--   * Rocks stream by proximity: folders fill a few seconds after a player
+--     arrives at a planet and empty when nobody is near.
+--   * A pickaxe only swings when it was equipped through
+--     Humanoid:EquipTool. When swings die, unequip -> wait -> EquipTool
+--     revives it (util.reequip); if that fails, switch the rock.
 --
--- Testing rule: tests pass { maxCycles = 5 }. The GUI never sets maxCycles.
+-- Stances (config + the "Hide mining" menu toggle):
+--   * "top"  - root on the rock's upper surface, visible but in range.
+--   * "hide" - root inside the rock mesh: nobody can see the character,
+--              same server range, collision managed here while running.
+--
+-- Testing rule: tests call farm.start({ maxJuice = 5 }) - the run stops once
+-- 5 stacks were COLLECTED. The GUI never passes these, shipped runs are
+-- unlimited.
 
 return function(deps)
 	local config = deps.config
@@ -585,9 +731,23 @@ return function(deps)
 
 	local running = false
 	local thread: thread? = nil
-	local cycles = 0
+
+	-- Per-frame stance hold: gravity and depenetration beat a single CFrame
+	-- write, re-applying every RenderStepped frame is what was proven to hold.
+	local holdCF: CFrame? = nil
+	local holdConn: RBXScriptConnection? = nil
+
+	-- metrics (the menu shows these through farm.stats())
+	local cycles = 0 -- swings sent
+	local gained = 0 -- juice stacks collected (counted when they land)
 	local sold = 0
+	local fixes = 0
+	local switches = 0
 	local lastReport = 0
+
+	-- rocks on cooldown after a stall (rock -> release time)
+	local avoided: { [BasePart]: number } = {}
+	local lastPlanet: string? = nil
 
 	local function report(msg: string)
 		if os.clock() - lastReport > 2 then
@@ -596,36 +756,243 @@ return function(deps)
 		end
 	end
 
-	local function runLoop(opts)
-		local maxCycles = opts and opts.maxCycles
-		cycles = 0
+	------------------------------------------------------------------ stance
+	local function hidden(): boolean
+		return state.enabled("HideMining")
+	end
 
-		while running do
-			if maxCycles and cycles >= maxCycles then
-				util.notify("Auto-Farm", "test cap reached (" .. cycles .. " cycles)")
+	-- CFrame to hold while swinging this rock, never farther from the centre
+	-- than config.farm.maxRange (the server drops swings past that).
+	local function stanceCFrame(rock: BasePart, fromPos: Vector3): CFrame
+		if hidden() then
+			local dir = fromPos - rock.Position
+			dir = if dir.Magnitude > 1 then dir.Unit else Vector3.new(0, 0, 1)
+			local off = math.min(config.farm.hideOffset, config.farm.maxRange - 4)
+			local pos = rock.Position + dir * off
+			return CFrame.lookAt(pos, Vector3.new(rock.Position.X, pos.Y, rock.Position.Z))
+		end
+		-- Top stance: root on the upper surface (feet at the rock's top).
+		-- Rocks taller than the server range sit just under the top instead -
+		-- still inside the mesh, still mineable.
+		local topY = rock.Size.Y / 2 + 3
+		if topY > config.farm.maxRange then
+			topY = config.farm.maxRange
+		end
+		local pos = rock.Position + Vector3.new(0, topY, 0)
+		return CFrame.lookAt(pos, Vector3.new(rock.Position.X, pos.Y, rock.Position.Z))
+	end
+
+	local function startHold()
+		if holdConn then
+			return
+		end
+		holdConn = util.RunService.RenderStepped:Connect(function()
+			local cf = holdCF
+			if cf then
+				local root = util.root()
+				if root then
+					root.CFrame = cf
+				end
+			end
+		end)
+	end
+
+	local function stopHold()
+		holdCF = nil
+		if holdConn then
+			holdConn:Disconnect()
+			holdConn = nil
+		end
+	end
+
+	-- Hide mode parks the character inside solid rock; without this the
+	-- solver ejects it every frame. Only touches collision when the stance
+	-- needs it, and always restores the body it changed.
+	local collChar: Model? = nil
+	local collOff = false
+
+	local function restoreCollision()
+		if collChar and collOff and collChar.Parent then
+			for _, part in ipairs(collChar:GetDescendants()) do
+				if part:IsA("BasePart") then
+					part.CanCollide = true
+				end
+			end
+		end
+		collChar = nil
+		collOff = false
+	end
+
+	local function syncCollision()
+		local char = util.character()
+		local wantOff = running and hidden()
+		if char == collChar and wantOff == collOff then
+			return
+		end
+		restoreCollision()
+		if wantOff and char then
+			for _, part in ipairs(char:GetDescendants()) do
+				if part:IsA("BasePart") then
+					part.CanCollide = false
+				end
+			end
+			collChar = char
+			collOff = true
+		end
+	end
+
+	------------------------------------------------------------------- rocks
+	local function pickRock(fromPos: Vector3): BasePart?
+		local now = os.clock()
+		for rock, untilT in pairs(avoided) do
+			if untilT <= now or not rock.Parent then
+				avoided[rock] = nil
+			end
+		end
+		local best, bestD
+		for _, rock in ipairs(util.rocks()) do
+			if not avoided[rock] then
+				local d = util.dist(fromPos, rock.Position)
+				if not bestD or d < bestD then
+					best, bestD = rock, d
+				end
+			end
+		end
+		return best
+	end
+
+	-- Every rock is on cooldown: release the oldest instead of stalling.
+	local function releaseOldestAvoided(): boolean
+		local oldest, oldestT
+		for rock, untilT in pairs(avoided) do
+			if not oldestT or untilT < oldestT then
+				oldest, oldestT = rock, untilT
+			end
+		end
+		if oldest then
+			avoided[oldest] = nil
+			return true
+		end
+		return false
+	end
+
+	-- No rocks anywhere: the character is out of stream range or the phase
+	-- has none. Move to another planet and let the rocks stream in.
+	local function rotatePlanet()
+		local root = util.root()
+		if not root then
+			return
+		end
+		local scan = util.planetScan()
+		if #scan == 0 then
+			return
+		end
+		table.sort(scan, function(a, b)
+			return a.rocks > b.rocks
+		end)
+		-- Prefer a planet that already shows rocks and is not where we just
+		-- looked, so repeated rotations keep making progress.
+		local target = nil
+		for _, p in ipairs(scan) do
+			if p.rocks > 0 and p.name ~= lastPlanet then
+				target = p
 				break
 			end
+		end
+		if not target then
+			for _, p in ipairs(scan) do
+				if p.name ~= lastPlanet then
+					target = p
+					break
+				end
+			end
+		end
+		target = target or scan[1]
+		lastPlanet = target.name
+		root.CFrame = CFrame.new(util.dropToSurface(target.centre))
+		report("no rocks anywhere - moving to " .. target.name)
+		task.wait(1)
+	end
 
+	-- The auto-fix chain: swings go dead for no visible reason -> heal the
+	-- pickaxe, then switch rocks, then settle-wait. Any juice resets it.
+	local function autoFix(stage: number, pickaxe: Tool?, rock: BasePart?)
+		if stage == 1 and pickaxe then
+			if util.reequip(pickaxe) then
+				fixes += 1
+				report("pickaxe went dead - re-equipped")
+				return true
+			end
+			return false
+		end
+		if stage == 2 and rock then
+			avoided[rock] = os.clock() + config.farm.rockSwitchDelay
+			switches += 1
+			report("rock stalled - switching")
+			return true
+		end
+		if stage == 3 then
+			-- Server-side wedge or a wave transition: give it a few seconds.
+			report("swings still dead - settling")
+			task.wait(3)
+			return true
+		end
+		return false
+	end
+
+	------------------------------------------------------------------- loop
+	local function runLoop(opts)
+		local maxCycles = opts and opts.maxCycles
+		local maxJuice = opts and opts.maxJuice
+
+		cycles, gained, sold, fixes, switches = 0, 0, 0, 0, 0
+		avoided = {}
+		lastPlanet = nil
+		local stall = 0 -- swings since the last juice
+		local fixStage = 0
+		local emptyWaits = 0
+		local aimFails = 0
+		local lastJuice = util.juiceCount()
+
+		local function noteJuice()
+			local now = util.juiceCount()
+			if now > lastJuice then
+				gained += now - lastJuice
+				stall = 0
+				fixStage = 0
+			end
+			lastJuice = now
+		end
+
+		startHold()
+
+		while running do
+			syncCollision()
+
+			if maxJuice and gained >= maxJuice then
+				util.notify("Auto-Farm", "test cap reached (" .. gained .. " juice)")
+				break
+			end
+			if maxCycles and cycles >= maxCycles then
+				util.notify("Auto-Farm", "test cap reached (" .. cycles .. " swings)")
+				break
+			end
 			if not util.alive() then
 				task.wait(1)
 				continue
 			end
 
-			-- Sell whatever we are holding first so the stack never fills up.
+			noteJuice()
+
+			-- Sell before the stack fills so the backpack never clogs.
 			if util.juiceCount() >= config.farm.sellAt then
 				local count = util.sellAll()
 				if count > 0 then
 					sold += count
-					report(string.format("sold %d stacks (total sold %d)", count, sold))
+					report(string.format("sold %d stacks (total %d)", count, sold))
 				end
+				lastJuice = util.juiceCount()
 				task.wait(0.4)
-				continue
-			end
-
-			local rock = util.nearestRock()
-			if not rock then
-				-- Waves: an empty folder means wait, not broken.
-				task.wait(config.farm.noRockDelay)
 				continue
 			end
 
@@ -635,29 +1002,30 @@ return function(deps)
 				continue
 			end
 
-			-- Rocks are huge - the "MarsRocks" union is 63 studs across - so the
-			-- stand-off must be measured from the rock's EDGE, not its centre.
-			-- Standing a fixed distance from the centre parks the character
-			-- inside the rock, and a swing fired from inside the geometry never
-			-- mines: the server answers the remote but nothing breaks.
-			local half = math.max(rock.Size.X, rock.Size.Y, rock.Size.Z) / 2
-			local standOff = half + config.farm.edgeMargin
-			local dist = util.dist(root.Position, rock.Position)
-
-			if dist > standOff + 6 then
-				-- Keep the side we are already on and hop straight there. The
-				-- game has no movement check, and creeping 8 studs at a time
-				-- across a 300-stud field spends the whole wave walking.
-				local side = root.Position - rock.Position
-				side = if side.Magnitude > 1 then side.Unit else Vector3.new(0, 0, 1)
-				root.CFrame = CFrame.new(rock.Position + side * standOff + Vector3.new(0, 6, 0))
-				task.wait(0.35)
+			local rock = pickRock(root.Position)
+			if not rock then
+				if #util.rocks() > 0 and releaseOldestAvoided() then
+					task.wait(1)
+					continue
+				end
+				emptyWaits += 1
+				if emptyWaits >= config.farm.planetWaits then
+					emptyWaits = 0
+					rotatePlanet()
+				end
+				task.wait(config.farm.noRockDelay)
 				continue
 			end
+			emptyWaits = 0
+
+			-- Stance: hold it from here on; recomputed whenever we re-enter.
+			holdCF = stanceCFrame(rock, root.Position)
+			syncCollision() -- the hide toggle may have flipped since last pass
+			task.wait(0.15)
 
 			local pickaxe = util.bestPickaxe()
 			if not pickaxe then
-				util.notify("Auto-Farm", "no pickaxe found")
+				report("no pickaxe found")
 				task.wait(3)
 				continue
 			end
@@ -665,47 +1033,74 @@ return function(deps)
 				task.wait(1)
 				continue
 			end
+			task.wait(config.farm.equipDelay)
 
-			-- Camera stand-off is wider still, so the view starts outside the
-			-- rock and the ray through the mouse lands on its surface.
-			local ok = util.aimAt(rock.Position, half + 40)
-			if not ok then
-				task.wait(0.3)
+			-- Camera stand-off wider than the rock so the ray through the
+			-- cursor lands on its surface no matter where we stand.
+			local half = math.max(rock.Size.X, rock.Size.Y, rock.Size.Z) / 2
+			if not util.aimAt(rock.Position, half + 40) then
+				aimFails += 1
+				if aimFails % 10 == 0 then
+					report("aim cannot find the rock (" .. aimFails .. " tries)")
+				end
+				task.wait(math.min(0.3 + aimFails * 0.2, 2))
 				continue
 			end
+			aimFails = 0
 
-			-- Swing until this rock is gone, but never more than a handful of
-			-- times so a stale rock reference cannot spin forever - and never
-			-- past a test cap, so a capped run cannot overshoot it.
-			local swings = 0
-			while running
-				and rock.Parent
-				and swings < 5
-				and (not maxCycles or cycles < maxCycles)
-			do
+			-- Swing a batch, then re-evaluate: the aim may drift, the rock may
+			-- be gone, a test cap may be due.
+			local batch = 0
+			while running and rock.Parent and batch < 5 do
+				if maxCycles and cycles >= maxCycles then
+					break
+				end
+				if maxJuice and gained >= maxJuice then
+					break
+				end
+				if util.juiceCount() >= config.farm.sellAt then
+					break
+				end
+
 				pcall(function()
 					pickaxe:Activate()
 				end)
-				swings += 1
+				batch += 1
 				cycles += 1
+				stall += 1
 				task.wait(config.farm.swingDelay)
+				noteJuice()
 			end
 
 			util.stopAim()
-			task.wait(0.1)
+
+			-- Chain runs only after stallSwings dead swings; juice resets it.
+			if running and stall >= config.farm.stallSwings then
+				fixStage = fixStage + 1
+				if fixStage > 3 then
+					fixStage = 1
+				end
+				if autoFix(fixStage, pickaxe, rock) then
+					stall = 0
+				else
+					fixStage = 0
+				end
+			end
 		end
 
 		util.stopAim()
+		stopHold()
+		restoreCollision()
 		running = false
 	end
 
-	-- opts: { maxCycles = n } for tests. Shipped GUI calls farm.start() bare.
+	-- opts: { maxJuice = n, maxCycles = n } for tests. GUI calls farm.start() bare.
 	function farm.start(opts)
 		if running then
 			return false
 		end
 		running = true
-		cycles = 0
+		cycles, gained, sold, fixes, switches = 0, 0, 0, 0, 0
 		thread = task.spawn(runLoop, opts)
 		return true
 	end
@@ -713,6 +1108,9 @@ return function(deps)
 	function farm.stop()
 		running = false
 		util.stopAim()
+		stopHold()
+		-- Restore immediately: the loop may still be sleeping out a wait.
+		restoreCollision()
 	end
 
 	function farm.isRunning(): boolean
@@ -720,10 +1118,16 @@ return function(deps)
 	end
 
 	function farm.stats(): string
-		return string.format("cycles=%d sold=%d running=%s", cycles, sold, tostring(running))
+		return string.format(
+			"%d swings · %d juice · %d sold · %d fixes",
+			cycles,
+			gained,
+			sold,
+			fixes + switches
+		)
 	end
 
-	-- Called by the menu whenever the AutoFarm toggle or its settings change.
+	-- Called by the menu whenever the AutoFarm toggle changes.
 	function farm.sync()
 		if state.enabled("AutoFarm") then
 			farm.start()
@@ -965,17 +1369,19 @@ return function(deps)
 	end
 
 	-- Name -> resolver. Anything that does not exist yet simply reports nil.
+	-- group tags a destination's siblings: when one is missing (phases come
+	-- and go) travel.to falls back to another destination in its group.
 	travel.destinations = {
-		{ name = "Bunker", resolve = function() return anchorOf({ "Bunker" }) end },
-		{ name = "City", resolve = function() return anchorOf({ "City" }) end },
-		{ name = "Venus City", resolve = function() return anchorOf({ "VenusCity" }) end },
-		{ name = "Sun", resolve = function() return anchorOf({ "Sun" }) end },
-		{ name = "Planet 1", resolve = function() return planetCentre(1) end },
-		{ name = "Planet 2", resolve = function() return planetCentre(2) end },
-		{ name = "Planet 3", resolve = function() return planetCentre(3) end },
-		{ name = "Planet 4", resolve = function() return planetCentre(4) end },
-		{ name = "Planet 5", resolve = function() return planetCentre(5) end },
-		{ name = "Planet 6", resolve = function() return planetCentre(6) end },
+		{ name = "Bunker", group = "hub", resolve = function() return anchorOf({ "Bunker" }) end },
+		{ name = "City", group = "hub", resolve = function() return anchorOf({ "City" }) end },
+		{ name = "Venus City", group = "hub", resolve = function() return anchorOf({ "VenusCity" }) end },
+		{ name = "Sun", group = "landmark", resolve = function() return anchorOf({ "Sun" }) end },
+		{ name = "Planet 1", group = "planet", resolve = function() return planetCentre(1) end },
+		{ name = "Planet 2", group = "planet", resolve = function() return planetCentre(2) end },
+		{ name = "Planet 3", group = "planet", resolve = function() return planetCentre(3) end },
+		{ name = "Planet 4", group = "planet", resolve = function() return planetCentre(4) end },
+		{ name = "Planet 5", group = "planet", resolve = function() return planetCentre(5) end },
+		{ name = "Planet 6", group = "planet", resolve = function() return planetCentre(6) end },
 	}
 
 	function travel.destinationNames(): { string }
@@ -996,37 +1402,51 @@ return function(deps)
 		return out
 	end
 
-	-- Land on the surface, not inside the body: planet "Center" parts are the
-	-- planet itself, so dropping the player at centre + 8 starts them inside
-	-- the ground and they fall. Raycast down from above instead.
-	local function surfacePosition(pos: Vector3): Vector3
-		local params = RaycastParams.new()
-		params.FilterType = Enum.RaycastFilterType.Exclude
-		params.FilterDescendantsInstances = { util.character() }
-		local hit = workspace:Raycast(pos + Vector3.new(0, 600, 0), Vector3.new(0, -1500, 0), params)
-		if hit then
-			return hit.Position + Vector3.new(0, 5, 0)
-		end
-		return pos + Vector3.new(0, 10, 0)
-	end
-
+	-- Teleport to a named destination. Planet "Center" parts are the planet
+	-- itself, so landing uses the shared surface raycast: drop from above
+	-- and land on the ground, never inside the geometry.
 	function travel.to(name: string): boolean
+		local entry = nil
 		for _, d in ipairs(travel.destinations) do
 			if d.name == name then
-				local pos = d.resolve()
-				if not pos then
-					util.notify("Teleport failed", name .. " is not in this world yet")
-					return false
-				end
-				local root = util.root()
-				if not root then
-					return false
-				end
-				root.CFrame = CFrame.new(surfacePosition(pos))
-				return true
+				entry = d
+				break
 			end
 		end
-		return false
+		if not entry then
+			return false
+		end
+
+		local pos = entry.resolve()
+		if not pos then
+			-- The requested place is not in this world phase: fall back to a
+			-- sibling in the same group instead of failing outright.
+			for _, alt in ipairs(travel.destinations) do
+				if alt.group == entry.group and alt.name ~= entry.name then
+					local altPos = alt.resolve()
+					if altPos then
+						util.notify(
+							"Teleport",
+							entry.name .. " is not in this world - going to " .. alt.name
+						)
+						entry = alt
+						pos = altPos
+						break
+					end
+				end
+			end
+		end
+		if not pos then
+			util.notify("Teleport failed", name .. " is not in this world yet")
+			return false
+		end
+
+		local root = util.root()
+		if not root then
+			return false
+		end
+		root.CFrame = CFrame.new(util.dropToSurface(pos))
+		return true
 	end
 
 	-- Teleport somewhere the menu names but the module does not hardcode,
@@ -1379,7 +1799,10 @@ return function(deps)
 		return char ~= nil and tool.Parent == char
 	end
 
-	-- Equip and wait until the tool really is in the character.
+	-- Equip through the Humanoid. Never set tool.Parent = char directly:
+	-- that leaves a stuck tool whose Tool.Activated never fires, so mining
+	-- silently dies. Unequip strays first, then Humanoid:EquipTool - the
+	-- sequence the game itself uses (user's fix: unequip -> re-equip).
 	function util.equip(tool: Tool, timeout: number?): boolean
 		if not tool then
 			return false
@@ -1388,10 +1811,41 @@ return function(deps)
 			return true
 		end
 		local char = util.character()
-		if not char then
+		local hum = util.humanoid()
+		if not char or not hum then
 			return false
 		end
-		tool.Parent = char
+		for _, t in ipairs(char:GetChildren()) do
+			if t:IsA("Tool") and t ~= tool then
+				t.Parent = LocalPlayer.Backpack
+			end
+		end
+		hum:EquipTool(tool)
+		local deadline = os.clock() + (timeout or 2)
+		while os.clock() < deadline do
+			if util.isEquipped(tool) then
+				return true
+			end
+			task.wait(0.05)
+		end
+		return util.isEquipped(tool)
+	end
+
+	-- Full heal for a stuck pickaxe: send it back to the Backpack, let the
+	-- character settle, then re-equip through the Humanoid. This is the
+	-- only sequence proven to restore Tool.Activated on a stuck tool, and
+	-- what the farm loop's auto-fix uses when swings stop landing.
+	function util.reequip(tool: Tool, timeout: number?): boolean
+		if not tool then
+			return false
+		end
+		local hum = util.humanoid()
+		if not hum then
+			return false
+		end
+		tool.Parent = LocalPlayer.Backpack
+		task.wait(0.15)
+		hum:EquipTool(tool)
 		local deadline = os.clock() + (timeout or 2)
 		while os.clock() < deadline do
 			if util.isEquipped(tool) then
@@ -1506,6 +1960,54 @@ return function(deps)
 			end
 		end
 		return best
+	end
+
+	-- Where a teleport should land: raycast down from above the point so the
+	-- character ends on the surface instead of inside the geometry.
+	function util.dropToSurface(pos: Vector3): Vector3
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { util.character() }
+		local hit = workspace:Raycast(pos + Vector3.new(0, 600, 0), Vector3.new(0, -1500, 0), params)
+		if hit then
+			return hit.Position + Vector3.new(0, 5, 0)
+		end
+		return pos + Vector3.new(0, 10, 0)
+	end
+
+	-- Every planet that exists right now: centre plus how many rocks are
+	-- streaming at it. Rocks only exist while somebody is near the planet,
+	-- so this doubles as "where can I actually mine".
+	function util.planetScan(): { { name: string, centre: Vector3, rocks: number } }
+		local out = {}
+		local planets = workspace:FindFirstChild("Planets")
+		if not planets then
+			return out
+		end
+		for _, planet in ipairs(planets:GetChildren()) do
+			local centre: Vector3? = nil
+			if planet:IsA("BasePart") then
+				centre = (planet :: BasePart).Position
+			else
+				local c = (planet :: any):FindFirstChild("Center")
+				if c and c:IsA("BasePart") then
+					centre = (c :: BasePart).Position
+				else
+					local p = (planet :: any):FindFirstChildWhichIsA("BasePart", true)
+					centre = p and (p :: BasePart).Position or nil
+				end
+			end
+			if centre then
+				local rocks = 0
+				for _, inst in ipairs((planet :: any):GetDescendants()) do
+					if inst:IsA("Folder") and inst.Name == "Rocks" then
+						rocks += #(inst :: Folder):GetChildren()
+					end
+				end
+				table.insert(out, { name = planet.Name, centre = centre, rocks = rocks })
+			end
+		end
+		return out
 	end
 
 	------------------------------------------------------------------ monsters
@@ -1782,6 +2284,11 @@ ui.slider(farmTab, "SwingDelay", {
 	suffix = "s",
 })
 
+ui.toggle(farmTab, "HideMining", {
+	name = "Hide mining",
+	description = "Stands the character inside the rock where nobody can see it. The server only accepts swings within ~30 studs of a rock, so staying hidden and staying paid are the same spot.",
+})
+
 ui.button(farmTab, {
 	name = "Sell everything now",
 	description = "Same call the game's own sell button makes.",
@@ -1799,18 +2306,7 @@ ui.section(farmTab, "Wallet")
 
 local creditsStat = ui.stat(farmTab, { name = "Credits", value = util.credits() })
 local juiceStat = ui.stat(farmTab, { name = "MoonJuice on hand", value = util.juiceValue() })
-
-ui.button(farmTab, {
-	name = "Refresh wallet",
-	callback = function()
-		if creditsStat then
-			creditsStat:Set(util.credits())
-		end
-		if juiceStat then
-			juiceStat:Set(util.juiceValue())
-		end
-	end,
-})
+local farmStat = ui.stat(farmTab, { name = "Farm", value = "idle" })
 
 -- ESP --------------------------------------------------------------------
 ui.section(espTab, "Overlays")
@@ -1834,6 +2330,11 @@ ui.toggle(espTab, "ESPRocks", {
 	name = "Rocks",
 	description = "Mineable rocks on every planet.",
 	value = config.esp.rocks,
+})
+ui.toggle(espTab, "ESPLabels", {
+	name = "Name labels",
+	description = "Draw name, health and distance over the nearest visible target.",
+	value = config.esp.labels,
 })
 
 -- Travel -----------------------------------------------------------------
@@ -1980,6 +2481,9 @@ end)
 state.on("ESPRocks", function()
 	esp.sync()
 end)
+state.on("ESPLabels", function()
+	esp.sync()
+end)
 
 state.on("Noclip", function()
 	travel.sync()
@@ -2021,7 +2525,7 @@ else
 	applyNoRender(state.get("NoRender"))
 end
 
----------------------------------------------------------------- live wallet
+-------------------------------------------------------------- live stats
 task.spawn(function()
 	while true do
 		if window.unloaded then
@@ -2033,6 +2537,9 @@ task.spawn(function()
 			end
 			if juiceStat then
 				juiceStat:Set(util.juiceValue())
+			end
+			if farmStat then
+				farmStat:Set(farm.isRunning() and farm.stats() or "idle")
 			end
 		end)
 		task.wait(2)

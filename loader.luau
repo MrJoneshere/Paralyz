@@ -7,7 +7,7 @@
 -- Loadstring one-liner (once the repo is public):
 --   loadstring(game:HttpGet("https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/loader.luau"))()
 
-local VERSION = "0.1.0"
+local VERSION = "0.2.0"
 local BASE = "https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/src/"
 
 -- The bundler replaces this line with a literal table of module sources.
@@ -124,6 +124,11 @@ ui.slider(farmTab, "SwingDelay", {
 	suffix = "s",
 })
 
+ui.toggle(farmTab, "HideMining", {
+	name = "Hide mining",
+	description = "Stands the character inside the rock where nobody can see it. The server only accepts swings within ~30 studs of a rock, so staying hidden and staying paid are the same spot.",
+})
+
 ui.button(farmTab, {
 	name = "Sell everything now",
 	description = "Same call the game's own sell button makes.",
@@ -141,18 +146,7 @@ ui.section(farmTab, "Wallet")
 
 local creditsStat = ui.stat(farmTab, { name = "Credits", value = util.credits() })
 local juiceStat = ui.stat(farmTab, { name = "MoonJuice on hand", value = util.juiceValue() })
-
-ui.button(farmTab, {
-	name = "Refresh wallet",
-	callback = function()
-		if creditsStat then
-			creditsStat:Set(util.credits())
-		end
-		if juiceStat then
-			juiceStat:Set(util.juiceValue())
-		end
-	end,
-})
+local farmStat = ui.stat(farmTab, { name = "Farm", value = "idle" })
 
 -- ESP --------------------------------------------------------------------
 ui.section(espTab, "Overlays")
@@ -176,6 +170,11 @@ ui.toggle(espTab, "ESPRocks", {
 	name = "Rocks",
 	description = "Mineable rocks on every planet.",
 	value = config.esp.rocks,
+})
+ui.toggle(espTab, "ESPLabels", {
+	name = "Name labels",
+	description = "Draw name, health and distance over the nearest visible target.",
+	value = config.esp.labels,
 })
 
 -- Travel -----------------------------------------------------------------
@@ -322,6 +321,9 @@ end)
 state.on("ESPRocks", function()
 	esp.sync()
 end)
+state.on("ESPLabels", function()
+	esp.sync()
+end)
 
 state.on("Noclip", function()
 	travel.sync()
@@ -363,7 +365,7 @@ else
 	applyNoRender(state.get("NoRender"))
 end
 
----------------------------------------------------------------- live wallet
+-------------------------------------------------------------- live stats
 task.spawn(function()
 	while true do
 		if window.unloaded then
@@ -375,6 +377,9 @@ task.spawn(function()
 			end
 			if juiceStat then
 				juiceStat:Set(util.juiceValue())
+			end
+			if farmStat then
+				farmStat:Set(farm.isRunning() and farm.stats() or "idle")
 			end
 		end)
 		task.wait(2)

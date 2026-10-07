@@ -95,7 +95,10 @@ return function(deps)
 		return char ~= nil and tool.Parent == char
 	end
 
-	-- Equip and wait until the tool really is in the character.
+	-- Equip through the Humanoid. Never set tool.Parent = char directly:
+	-- that leaves a stuck tool whose Tool.Activated never fires, so mining
+	-- silently dies. Unequip strays first, then Humanoid:EquipTool - the
+	-- sequence the game itself uses (user's fix: unequip -> re-equip).
 	function util.equip(tool: Tool, timeout: number?): boolean
 		if not tool then
 			return false
@@ -104,10 +107,41 @@ return function(deps)
 			return true
 		end
 		local char = util.character()
-		if not char then
+		local hum = util.humanoid()
+		if not char or not hum then
 			return false
 		end
-		tool.Parent = char
+		for _, t in ipairs(char:GetChildren()) do
+			if t:IsA("Tool") and t ~= tool then
+				t.Parent = LocalPlayer.Backpack
+			end
+		end
+		hum:EquipTool(tool)
+		local deadline = os.clock() + (timeout or 2)
+		while os.clock() < deadline do
+			if util.isEquipped(tool) then
+				return true
+			end
+			task.wait(0.05)
+		end
+		return util.isEquipped(tool)
+	end
+
+	-- Full heal for a stuck pickaxe: send it back to the Backpack, let the
+	-- character settle, then re-equip through the Humanoid. This is the
+	-- only sequence proven to restore Tool.Activated on a stuck tool, and
+	-- what the farm loop's auto-fix uses when swings stop landing.
+	function util.reequip(tool: Tool, timeout: number?): boolean
+		if not tool then
+			return false
+		end
+		local hum = util.humanoid()
+		if not hum then
+			return false
+		end
+		tool.Parent = LocalPlayer.Backpack
+		task.wait(0.15)
+		hum:EquipTool(tool)
 		local deadline = os.clock() + (timeout or 2)
 		while os.clock() < deadline do
 			if util.isEquipped(tool) then
@@ -222,6 +256,54 @@ return function(deps)
 			end
 		end
 		return best
+	end
+
+	-- Where a teleport should land: raycast down from above the point so the
+	-- character ends on the surface instead of inside the geometry.
+	function util.dropToSurface(pos: Vector3): Vector3
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { util.character() }
+		local hit = workspace:Raycast(pos + Vector3.new(0, 600, 0), Vector3.new(0, -1500, 0), params)
+		if hit then
+			return hit.Position + Vector3.new(0, 5, 0)
+		end
+		return pos + Vector3.new(0, 10, 0)
+	end
+
+	-- Every planet that exists right now: centre plus how many rocks are
+	-- streaming at it. Rocks only exist while somebody is near the planet,
+	-- so this doubles as "where can I actually mine".
+	function util.planetScan(): { { name: string, centre: Vector3, rocks: number } }
+		local out = {}
+		local planets = workspace:FindFirstChild("Planets")
+		if not planets then
+			return out
+		end
+		for _, planet in ipairs(planets:GetChildren()) do
+			local centre: Vector3? = nil
+			if planet:IsA("BasePart") then
+				centre = (planet :: BasePart).Position
+			else
+				local c = (planet :: any):FindFirstChild("Center")
+				if c and c:IsA("BasePart") then
+					centre = (c :: BasePart).Position
+				else
+					local p = (planet :: any):FindFirstChildWhichIsA("BasePart", true)
+					centre = p and (p :: BasePart).Position or nil
+				end
+			end
+			if centre then
+				local rocks = 0
+				for _, inst in ipairs((planet :: any):GetDescendants()) do
+					if inst:IsA("Folder") and inst.Name == "Rocks" then
+						rocks += #(inst :: Folder):GetChildren()
+					end
+				end
+				table.insert(out, { name = planet.Name, centre = centre, rocks = rocks })
+			end
+		end
+		return out
 	end
 
 	------------------------------------------------------------------ monsters

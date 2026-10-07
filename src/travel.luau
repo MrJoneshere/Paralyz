@@ -51,17 +51,19 @@ return function(deps)
 	end
 
 	-- Name -> resolver. Anything that does not exist yet simply reports nil.
+	-- group tags a destination's siblings: when one is missing (phases come
+	-- and go) travel.to falls back to another destination in its group.
 	travel.destinations = {
-		{ name = "Bunker", resolve = function() return anchorOf({ "Bunker" }) end },
-		{ name = "City", resolve = function() return anchorOf({ "City" }) end },
-		{ name = "Venus City", resolve = function() return anchorOf({ "VenusCity" }) end },
-		{ name = "Sun", resolve = function() return anchorOf({ "Sun" }) end },
-		{ name = "Planet 1", resolve = function() return planetCentre(1) end },
-		{ name = "Planet 2", resolve = function() return planetCentre(2) end },
-		{ name = "Planet 3", resolve = function() return planetCentre(3) end },
-		{ name = "Planet 4", resolve = function() return planetCentre(4) end },
-		{ name = "Planet 5", resolve = function() return planetCentre(5) end },
-		{ name = "Planet 6", resolve = function() return planetCentre(6) end },
+		{ name = "Bunker", group = "hub", resolve = function() return anchorOf({ "Bunker" }) end },
+		{ name = "City", group = "hub", resolve = function() return anchorOf({ "City" }) end },
+		{ name = "Venus City", group = "hub", resolve = function() return anchorOf({ "VenusCity" }) end },
+		{ name = "Sun", group = "landmark", resolve = function() return anchorOf({ "Sun" }) end },
+		{ name = "Planet 1", group = "planet", resolve = function() return planetCentre(1) end },
+		{ name = "Planet 2", group = "planet", resolve = function() return planetCentre(2) end },
+		{ name = "Planet 3", group = "planet", resolve = function() return planetCentre(3) end },
+		{ name = "Planet 4", group = "planet", resolve = function() return planetCentre(4) end },
+		{ name = "Planet 5", group = "planet", resolve = function() return planetCentre(5) end },
+		{ name = "Planet 6", group = "planet", resolve = function() return planetCentre(6) end },
 	}
 
 	function travel.destinationNames(): { string }
@@ -82,37 +84,51 @@ return function(deps)
 		return out
 	end
 
-	-- Land on the surface, not inside the body: planet "Center" parts are the
-	-- planet itself, so dropping the player at centre + 8 starts them inside
-	-- the ground and they fall. Raycast down from above instead.
-	local function surfacePosition(pos: Vector3): Vector3
-		local params = RaycastParams.new()
-		params.FilterType = Enum.RaycastFilterType.Exclude
-		params.FilterDescendantsInstances = { util.character() }
-		local hit = workspace:Raycast(pos + Vector3.new(0, 600, 0), Vector3.new(0, -1500, 0), params)
-		if hit then
-			return hit.Position + Vector3.new(0, 5, 0)
-		end
-		return pos + Vector3.new(0, 10, 0)
-	end
-
+	-- Teleport to a named destination. Planet "Center" parts are the planet
+	-- itself, so landing uses the shared surface raycast: drop from above
+	-- and land on the ground, never inside the geometry.
 	function travel.to(name: string): boolean
+		local entry = nil
 		for _, d in ipairs(travel.destinations) do
 			if d.name == name then
-				local pos = d.resolve()
-				if not pos then
-					util.notify("Teleport failed", name .. " is not in this world yet")
-					return false
-				end
-				local root = util.root()
-				if not root then
-					return false
-				end
-				root.CFrame = CFrame.new(surfacePosition(pos))
-				return true
+				entry = d
+				break
 			end
 		end
-		return false
+		if not entry then
+			return false
+		end
+
+		local pos = entry.resolve()
+		if not pos then
+			-- The requested place is not in this world phase: fall back to a
+			-- sibling in the same group instead of failing outright.
+			for _, alt in ipairs(travel.destinations) do
+				if alt.group == entry.group and alt.name ~= entry.name then
+					local altPos = alt.resolve()
+					if altPos then
+						util.notify(
+							"Teleport",
+							entry.name .. " is not in this world - going to " .. alt.name
+						)
+						entry = alt
+						pos = altPos
+						break
+					end
+				end
+			end
+		end
+		if not pos then
+			util.notify("Teleport failed", name .. " is not in this world yet")
+			return false
+		end
+
+		local root = util.root()
+		if not root then
+			return false
+		end
+		root.CFrame = CFrame.new(util.dropToSurface(pos))
+		return true
 	end
 
 	-- Teleport somewhere the menu names but the module does not hardcode,
