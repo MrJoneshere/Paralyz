@@ -2748,8 +2748,15 @@ return function(deps)
 		for _, d in ipairs(workspace:GetDescendants()) do
 			if d:IsA("ProximityPrompt") and d ~= conv then
 				local holder = d.Parent
+				local machine = holder and holder.Parent
 				local hay = string.lower(
-					d.ActionText .. " " .. d.ObjectText .. " " .. (holder and holder.Name or "")
+					d.ActionText
+						.. " "
+						.. d.ObjectText
+						.. " "
+						.. (holder and holder.Name or "")
+						.. " "
+						.. (machine and machine.Name or "")
 				)
 				if string.find(hay, "ioniz", 1, true) or string.find(hay, "ionmoon", 1, true) then
 					ionizerCache = d
