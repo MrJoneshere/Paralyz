@@ -262,6 +262,17 @@ workspace root + any `Planets.<p>.SpaceStation.ConverterMachine` (labelled `Anti
   `MoonJuice` (global), `MoonJuiceMars`, `MoonJuiceVenus`, `Laser`/`Laser2`/`Laser3` (0),
   `Sun` (false), `BossCooldown` (0), `Fuel` (65) - **ion buildings gate on `MoonJuiceVenus`,
   not the global pool** (buying against the global pool gets refused silently).
+- **Phase / threat system (decoded 2026-10-07):** `workspace.PlanetTracker` holds one entry per
+  story threat - live children: `Io, Saturn, Jupiter, Jupiter2, Neptune, EnragedNeptune, Mars,
+  Sun, BlackHole, Planet9`. Each carries attributes **`WarpActive` (bool), `WarpTime` (seconds),
+  `WarpStart` (server epoch)**; arrival ETA = `WarpStart + WarpTime - GetServerTimeNow()`.
+  `PlayerGui.ProgressBar.ProgressBarController` renders the nearest active one (ETA + progress
+  bar, "No incoming planets" when idle, "Too Far From The Tracker!" beyond range of the
+  physical tracker). Observed live: `Io WarpActive=true, WarpTime=700` (11.7 min cycle, ~4.5
+  min remaining), transparency 0 = visible; all others inactive with `Transparency=1`. The
+  `WarpActive=false + WarpTime set` state on Saturn looks like a finished/pending warp. The
+  shop label "Time Left Until Jupiter Eats The Earth" is the same countdown UI. Warping planets
+  = how content "appears as phases advance" (the farm's planetCooldown comment).
 
 
 ## Quests & playtime

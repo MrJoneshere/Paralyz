@@ -25,7 +25,7 @@ While the repo is still **private**, HttpGet cannot read it, so use the bundled 
 | `src/util.luau` | Character, tool, juice, rock and camera-aim helpers |
 | `src/perf.luau` | No-render mode (quality, shadows, post effects, FPS cap) |
 | `src/esp.luau` | Highlight-pool ESP (capped per layer) + one optional label |
-| `src/farm.luau` | Auto-farm: stance hold inside the server's mining range, swing, auto-fix, collect, convert ion, sell |
+| `src/farm.luau` | Auto-farm: stance hold inside the server's mining range, swing, yield-aware auto-fix, collect, ion-first planet rotation, convert ion, sell |
 | `src/combat.luau` | Keep-distance guard + gun mods: rail/rocket refire & volley, HexSpitter (Moon Gun) auto fire-loop with FireRate/accuracy/damage/pellet pins |
 | `src/travel.luau` | Teleport, noclip, fly |
 | `src/rewards.luau` | Free income: playtime chest listener + daily/weekly quest auto-claim (Knit QuestService) |
