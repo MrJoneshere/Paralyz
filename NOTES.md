@@ -11,6 +11,9 @@ Universe `8751492147`, place `133579701570149`. Index: 166 scripts, placeVersion
   unnecessary**, which is why the account with progress (PurpleHologr) stays in use.
 - Damage appears to be applied server-side: no client script takes damage, so a client-side god mode
   can only block what the client itself applies. Paralyz says so in the menu instead of pretending.
+- **Never install `spy-namecall` / remote-spy / any `__namecall` hook in this game** — it kicks with
+  Error 257 within seconds. Safe patterns proven here: `OnClientEvent:Connect`, `OnServerEvent`-side
+  observation, plain `FireServer` calls. Rejoining wipes `getgenv` and every hook anyway.
 
 ## Mining (the auto-farm core)
 
@@ -29,11 +32,29 @@ Consequences the code respects:
   lands on the rock (iterative NDC solve), then holds it on `RunService:BindToRenderStep`.
 - **Rocks are recursive.** The `Rocks` folder is a direct child on Planet4/Planet5 but hangs off the
   planet's `Center` part on Planet3/Planet6/Planet8/Planet9, so the lookup walks descendants.
-- **The folders are filled in waves.** All six were empty across several servers and many minutes of
-  watching — an empty folder means *wait*, not *broken*. No client script mentions `Rocks` or
-  `Minable`, so the spawner is server-owned.
+- **The folders are filled by proximity.** Folders fill ~3s after a player gets near a planet
+  (Planet5 = 18 rocks) and empty again when the player leaves — an empty folder means *move closer*,
+  not *broken*. No client script mentions `Rocks` or `Minable`, so the spawner is server-owned.
+  Hence farm rotation: teleport → wait ~3s → farm → next planet when empty.
 - The `Minable` BoolValue is inconsistent (observed `false` on rocks that still accepted a swing), so
   it is never used as a filter.
+
+### The server's two hard rules (measured)
+
+- **Mining range ≤ ~30 studs from the rock centre.** Binary search across jobs: swings accepted at
+  30 studs, rejected at 37, 55, 90 (12-swing batches, zero juice at range). Position is *never*
+  rolled back — holding 2000 studs away for minutes is fine — the server only checks swing distance.
+  So far-hide is impossible; the shipped "hide mining" stance puts the character **inside the rock**
+  (`hideOffset = 4` from centre): server-accepted (+2 juice / 12 swings) and the character is hidden.
+- **Every swing is answered at the shipped cadence.** At `swingDelay = 0.35` the ask count equals
+  the swing count (7 asks / 6 swings, 6/6 at 1.2s too) — the server does not throttle fast swings,
+  so more swings per minute is strictly better; cadence stays 0.35.
+- Observed yield this build: **~5–8% per swing** (~20 swings per rock-break). Earlier 17–25%
+  numbers were small-sample luck, not a different rule.
+- **Healthy equip is mandatory.** Setting `tool.Parent = character` leaves a *stuck* tool where
+  `Tool.Activated` never fires. The working path: unequip everything to Backpack, then
+  `Humanoid:EquipTool(pick)`. When mining stops for no reason, the farm's auto-fix chain runs
+  1) reequip → 2) switch rock (20s cooldown) → 3) settle, unattended.
 
 ## World layout (one server's snapshot — phases change this)
 
@@ -63,6 +84,15 @@ Consequences the code respects:
 - Buildings are bought with `Events.Buy:FireServer(name, "Building", cost, planet)` — spending
   per-planet currencies (MoonJuice/Mars/Venus), a possible later module.
 
+## Quests & playtime
+
+- Knit `QuestService`: `GetQuests()` may return data *or* a promise — always handle both.
+  `ClaimQuest("Daily"|"Weekly", id)` is safe to call.
+- Playtime rewards: listen for `Events.PlaytimeReward` with `Action == "Ready"`, then
+  `Events.PlaytimeClaim:FireServer()` — 1800s cycle.
+- `MineHits` quest never counts progress (server-side gap), and the `Minable` flag is useless as a
+  filter — don't build anything on either.
+
 ## Remotes (32 in `ReplicatedStorage.Events`)
 
 `Pickaxe`, `SellMoonjuice`, `Buy`, `QuestMine`, `QuestKill`, `QuestBuild`, `QuestRequest`,
@@ -84,6 +114,8 @@ you. Monsters themselves are `Moonfected` models under `Workspace.Unanchored.Sma
 ## Executor gotchas hit here
 
 - `firesignal` is a silent no-op in Real — use `send-input` for anything that must really happen.
+  `send-input` is focus-dependent, so it is only usable for manual testing, never for shipped
+  features; everything shipped must run in the background (camera aim + `Tool:Activate` do).
 - `BindToRenderStep` lives on `RunService`, not `Camera`.
 - Drawing overlays must project with `Camera:WorldToViewportPoint`, not `WorldToScreenPoint`.
 - Rayfield Gen2: `window:Unload()` (not `Destroy`), element `Set(value, true)` skips the callback,

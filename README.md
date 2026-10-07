@@ -24,8 +24,8 @@ While the repo is still **private**, HttpGet cannot read it, so use the bundled 
 | `src/ui.luau` | Defensive wrappers over Rayfield Gen2 elements, bound to state keys |
 | `src/util.luau` | Character, tool, juice, rock and camera-aim helpers |
 | `src/perf.luau` | No-render mode (quality, shadows, post effects, FPS cap) |
-| `src/esp.luau` | Drawing-library overlays for players, monsters, juice and rocks |
-| `src/farm.luau` | Auto-farm: aim, swing, collect, sell |
+| `src/esp.luau` | Highlight-pool ESP (capped per layer) + one optional label |
+| `src/farm.luau` | Auto-farm: stance hold inside the server's mining range, swing, auto-fix, collect, sell |
 | `src/combat.luau` | Auto-swing, keep-distance, best-effort damage guard |
 | `src/travel.luau` | Teleport, noclip, fly |
 | `scripts/build.mjs` | Packs everything into `dist/paralyz.bundle.luau` |
@@ -71,25 +71,40 @@ That is why toggling can never feed back into itself, and why the UI and the tru
 
 ## Testing policy
 
-Any auto-farm **test** is capped at 5 cycles:
+Any auto-farm **test** is capped at 5 collected MoonJuice stacks:
 
 ```lua
-getgenv().Paralyz.farm.start({ maxCycles = 5 })
+getgenv().Paralyz.farm.start({ maxJuice = 5 })
 ```
 
-The GUI's Auto Farm toggle takes no cap and runs open-ended - the cap exists for development only.
-Rejoin the server before every GUI run so each test starts from a clean DataModel.
+(`{ maxCycles = n }` also exists as a hard swing-count backstop.) The GUI's Auto Farm toggle takes
+no cap and runs open-ended - the caps exist for development only. Rejoin the server before every GUI
+run so each test starts from a clean DataModel.
+
+Measured cadence note: the server answers **every** swing at the shipped `swingDelay = 0.35` (ask
+count = swing count), so slower cadence buys nothing - more swings per minute is strictly better.
 
 ## GPU guard
 
-This machine's screen has died once to what looked like a GPU failure (RX 590, driver 31.0.21925.1001),
-so:
+This machine had **6 hard freezes in one night** (2026-10-07, RX 590, driver 31.0.21925.1001):
+three idle/poisoned-driver locks and two load-triggered ones (GPU at ~90% seconds before death,
+screen black + fans at 100%). No BSOD/TDR/WHEA event ever - the wedge is below TDR's reach.
+Mitigations in place, in order of arrival:
 
-- `ClientAppSettings.json` caps launch FPS and texture quality
-- Paralyz defaults **no-render mode ON**: `QualityLevel.Level01`, `GlobalShadows` off, post effects off,
-  `setfpscap(20)`
-- `gpu-load.log` / `gpu-watch.log` sample GPU load and adapter status continuously, and the
-  `ParalyzAdmin` scheduled task keeps both watchers alive across reboots
+- `ClientAppSettings.json` (`DFIntTaskSchedulerTargetFps: 20`) caps launch FPS so Roblox never
+  opens at an uncapped load spike - the exact window where crashes #2 and #6 died
+- `TdrDelay=8` / `TdrDdiDelay=8` (`HKLM\...\Control\GraphicsDrivers`) and `EnableUlps=0` on the
+  adapter - all verified still active after every reboot
+- PCIe ASPM off (AC+DC) on the Atlas Power Scheme, Fast Startup disabled
+- Paralyz defaults **no-render mode ON**: `QualityLevel.Level01`, `GlobalShadows` off, post effects
+  off, `setfpscap(20)` - in-game load collapses from ~80% to ~28% the moment it applies
+- `gpu-load.log` / `gpu-watch.log` sample GPU load, RAM% and adapter status continuously (with
+  `FREEZE-GAP`/`CLEAN-GAP` boot markers and `ROBLOX` context tags), and the `ParalyzAdmin`
+  scheduled task keeps both watchers alive across reboots
+- Windows Memory Diagnostic **Extended: no errors** - the mixed 8+16+8 GB sticks are exonerated
+
+Remaining suspects: driver state (DDU clean reinstall if it recurs) and GPU thermal/power at peak
+load.
 
 ## License
 
