@@ -133,7 +133,7 @@ return {
 	},
 
 	perf = {
-		fps = 20, -- frame cap while no-render is on
-		restoreFps = 0, -- 0 = Roblox default when no-render is off
+		fps = 20, -- frame cap while Lower Usage is on
+		restoreFps = 0, -- 0 = Roblox default when Lower Usage is off
 	},
 }

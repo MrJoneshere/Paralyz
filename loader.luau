@@ -291,14 +291,14 @@ ui.slider(travelTab, "FlySpeed", {
 -- Settings ---------------------------------------------------------------
 ui.section(settingsTab, "Performance")
 
-ui.toggle(settingsTab, "NoRender", {
-	name = "No-render mode",
-	description = "Lowest quality, no shadows, no post effects, capped FPS. Protects the GPU.",
-	value = true,
+ui.toggle(settingsTab, "LowerUsage", {
+	name = "Lower Usage",
+	description = "Lowest quality, no shadows, no post effects, capped FPS. Cuts GPU load - off by default so the game stays nice to look at.",
+	value = false,
 })
 ui.slider(settingsTab, "FpsCap", {
 	name = "FPS cap",
-	description = "Frame cap while no-render is on.",
+	description = "Frame cap while Lower Usage is on.",
 	range = { 10, 60 },
 	increment = 5,
 	value = config.perf.fps,
@@ -334,9 +334,9 @@ local function applyFlySpeed(v)
 	end
 end
 
-local function applyNoRender(v)
+local function applyLowerUsage(v)
 	local report = perf.apply(v == true)
-	window:Notify({ title = "No-render", content = report, duration = 4 })
+	window:Notify({ title = "Lower Usage", content = report, duration = 4 })
 end
 
 local function applyFpsCap(v)
@@ -344,7 +344,7 @@ local function applyFpsCap(v)
 		return
 	end
 	config.perf.fps = v
-	if state.get("NoRender") and setfpscap then
+	if state.get("LowerUsage") and setfpscap then
 		pcall(setfpscap, v)
 	end
 end
@@ -414,7 +414,7 @@ state.on("BlackScreen", function(value)
 	setBlackScreen(value == true)
 end)
 
-state.on("NoRender", applyNoRender)
+state.on("LowerUsage", applyLowerUsage)
 state.on("FpsCap", applyFpsCap)
 
 -- The config sliders may already hold values restored by autoLoad, and their
@@ -438,16 +438,18 @@ task.delay(1.5, function()
 end)
 
 -- First sync: everything defaults off, this just primes the modules with the
--- restored state (e.g. no-render was left on last session).
+-- restored state (e.g. Lower Usage was left on last session).
 farm.sync()
 esp.sync()
 travel.sync()
 rewards.sync()
 rewards.start()
-if state.get("NoRender") == nil then
-	state.set("NoRender", true)
+-- Off by default (user decision 2026-10-09): they play with the menu open and
+-- want the game to look normal. Flip it on when the GPU is struggling.
+if state.get("LowerUsage") == nil then
+	state.set("LowerUsage", false)
 else
-	applyNoRender(state.get("NoRender"))
+	applyLowerUsage(state.get("LowerUsage"))
 end
 
 -------------------------------------------------------------- live stats

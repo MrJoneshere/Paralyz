@@ -1,6 +1,6 @@
 --!strict
 -- Paralyz / src/perf.luau
--- No-render mode: the cheapest safe way to keep a struggling GPU alive.
+-- Lower Usage mode: the cheapest safe way to keep a struggling GPU alive.
 --
 -- Nothing here is a "trick" - it is Roblox's own quality controls driven down
 -- from the outside: lowest rendering quality, shadows off, post effects off and
@@ -31,7 +31,7 @@ return function(deps)
 		return ok
 	end
 
-	-- Turns no-render on or off. Returns a short report string.
+	-- Turns Lower Usage on or off. Returns a short report string.
 	function perf.apply(on: boolean): string
 		if on then
 			if not saved then
