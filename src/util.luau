@@ -332,6 +332,14 @@ return function(deps)
 	--     watcher proves the length constant - measured rounds ended at
 	--     2854 and 3527, so it is NOT constant.
 	-- The flag clears itself when the clock rewinds: that is a new round.
+	-- Fim ALONE is not an end signal: measured 2026-10-08, the current game
+	-- version keeps PlayerGui.Fim enabled from round start (it stayed on the
+	-- whole round while the clock climbed past 3000s - a "hide in the
+	-- bunker" overlay). Fim only counts together with a STOPPED story clock,
+	-- the state measured right before every hard reset (clock freezes, Fim
+	-- shows 10-41s, then the wipe) and during the 2026-10-08 server wedge.
+	local lastCs = util.storyClock()
+	local lastCsAt = os.clock()
 	local END_MARKERS = {
 		"dyson sphere got destroyed",
 		"the sun is moving",
@@ -384,9 +392,15 @@ return function(deps)
 		if endMarker then
 			return true
 		end
+		if cs ~= lastCs then
+			-- the round is live: the story clock advances, whatever Fim shows
+			lastCs = cs
+			lastCsAt = os.clock()
+			return false
+		end
 		local pg = LocalPlayer:FindFirstChild("PlayerGui")
 		local fim = pg and pg:FindFirstChild("Fim")
-		if fim and (fim :: ScreenGui).Enabled then
+		if fim and (fim :: ScreenGui).Enabled and os.clock() - lastCsAt >= 8 then
 			return true
 		end
 		local len = config.farm.roundLength
