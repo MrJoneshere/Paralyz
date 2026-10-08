@@ -4,3 +4,6 @@ Thumbs.db
 node_modules/
 .opencode/
 dist/*.tmp
+
+README.md
+NOTES.md
