@@ -419,13 +419,26 @@ return function(deps)
 		return nil
 	end
 
-	-- The ionizer (plain -> ion) is the first link of the chain and it is
-	-- phase/buy gated: a planet only gets one once its colony is built, so
-	-- the exact hierarchy was not stable enough to hardcode yet. Resolve
-	-- freshly with a short cache: any prompt whose own text or machine name
-	-- talks about ionizing (the converter is excluded by identity so its
-	-- "Insert Moonjuice" can never be mistaken for it). Measured cost: a
-	-- full workspace descendant scan, hence the 2s TTL.
+	-- The ionizer (plain -> ion), measured once Pluto's colony was built:
+	--   Planets.Planet6.Center.PlutoIndustries.ConverterMachine.PartProximity
+	-- It reuses the anti converter's exact machine and prompt names
+	-- ("ConverterMachine" + "Insert Moonjuice", 2s hold, 10 studs), so the
+	-- ONLY reliable identity is the structure above: the anti converter
+	-- lives under a SpaceStation, the ionizer under a "<Planet>Industries"
+	-- folder. Hierarchy probe first (cheap), then a text fallback for
+	-- machines whose shape is not known yet (the Venus/Mercury ion pumps).
+	-- Short TTL because the probe walks every planet's descendants.
+	local function underStation(inst: Instance): boolean
+		local cur: Instance? = inst
+		while cur do
+			if cur.Name == "SpaceStation" then
+				return true
+			end
+			cur = cur.Parent
+		end
+		return false
+	end
+
 	local ionizerCache: ProximityPrompt? = nil
 	local ionizerAt = 0
 	function util.ionizerPrompt(): ProximityPrompt?
@@ -434,9 +447,26 @@ return function(deps)
 		end
 		ionizerAt = os.clock()
 		ionizerCache = nil
-		local conv = util.converterPrompt()
+		local planets = workspace:FindFirstChild("Planets")
+		if planets then
+			for _, planet in ipairs((planets :: Folder):GetChildren()) do
+				for _, inst in ipairs((planet :: Instance):GetDescendants()) do
+					if inst.Name == "ConverterMachine" and not underStation(inst) then
+						local well = inst:FindFirstChild("PartProximity")
+						local prompt = well and well:FindFirstChildWhichIsA("ProximityPrompt", true)
+						if prompt then
+							ionizerCache = prompt
+							return ionizerCache
+						end
+					end
+				end
+			end
+		end
+		-- Unknown-hierarchy fallback: name/text match, anti converter
+		-- excluded by the SpaceStation check above so "Insert Moonjuice"
+		-- on the station can never be mistaken for the ionizer.
 		for _, d in ipairs(workspace:GetDescendants()) do
-			if d:IsA("ProximityPrompt") and d ~= conv then
+			if d:IsA("ProximityPrompt") and not underStation(d) then
 				local holder = d.Parent
 				local machine = holder and holder.Parent
 				local hay = string.lower(
@@ -596,10 +626,25 @@ return function(deps)
 		end
 	end
 
+	-- The story's planet names (user mapping): the folders are internal
+	-- Planet1..Planet6, but everything user-facing shows these.
+	local PLANET_LABELS = {
+		Planet1 = "Earth",
+		Planet2 = "Moon",
+		Planet3 = "Venus",
+		Planet4 = "Mars",
+		Planet5 = "Mercury",
+		Planet6 = "Pluto",
+	}
+
+	function util.planetLabel(name: string): string
+		return PLANET_LABELS[name] or name
+	end
+
 	-- Every planet that exists right now: centre plus how many rocks are
 	-- streaming at it. Rocks only exist while somebody is near the planet,
 	-- so this doubles as "where can I actually mine".
-	function util.planetScan(): { { name: string, centre: Vector3, rocks: number } }
+	function util.planetScan(): { { name: string, label: string, centre: Vector3, rocks: number } }
 		local out = {}
 		local planets = workspace:FindFirstChild("Planets")
 		if not planets then
@@ -625,7 +670,7 @@ return function(deps)
 						rocks += #(inst :: Folder):GetChildren()
 					end
 				end
-				table.insert(out, { name = planet.Name, centre = centre, rocks = rocks })
+				table.insert(out, { name = planet.Name, label = util.planetLabel(planet.Name), centre = centre, rocks = rocks })
 			end
 		end
 		return out
@@ -656,7 +701,7 @@ return function(deps)
 			for _, planet in ipairs(planets:GetChildren()) do
 				local station = (planet :: any):FindFirstChild("SpaceStation")
 				if station and (station :: any):FindFirstChild("ConverterMachine") then
-					add("AntiMatter@" .. planet.Name)
+					add("AntiMatter@" .. util.planetLabel(planet.Name))
 				end
 			end
 		end

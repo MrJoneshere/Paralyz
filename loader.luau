@@ -203,16 +203,26 @@ ui.toggle(espTab, "ESPLabels", {
 -- Travel -----------------------------------------------------------------
 ui.section(travelTab, "Teleport")
 
+-- A saved "Planet 5" selection predates the real names; map it once so
+-- the dropdown never shows an option that is not in its list.
+local savedDest = state.get("TeleportDest")
+if type(savedDest) ~= "string" then
+	savedDest = "City"
+else
+	savedDest = travel.canonical(savedDest)
+	state.set("TeleportDest", savedDest)
+end
+
 ui.dropdown(travelTab, "TeleportDest", {
 	name = "Destination",
-	description = "Places that exist in the current world phase.",
+	description = "Planets use their story names (Earth, Moon, Venus, Mars, Mercury, Pluto). Structures appear when they are built.",
 	options = travel.destinationNames(),
-	value = "City",
+	value = savedDest,
 })
 
 ui.button(travelTab, {
 	name = "Teleport",
-	description = "Jump to the selected destination.",
+	description = "Jump to the selected destination and verify the landing.",
 	callback = function()
 		local dest = state.get("TeleportDest") or "City"
 		travel.to(dest)
@@ -228,6 +238,30 @@ ui.button(travelTab, {
 			travel.toPosition(rock.Position)
 		else
 			window:Notify({ title = "Travel", content = "No rocks in the world right now", duration = 3 })
+		end
+	end,
+})
+
+ui.section(travelTab, "Chain Machines")
+
+local machineStat = ui.text(travelTab, { name = "Machines", text = "reading..." })
+
+ui.button(travelTab, {
+	name = "To ionizer",
+	description = "Go to the plain->ion machine (comes with Pluto Colony).",
+	callback = function()
+		if not travel.to("Ionizer") then
+			window:Notify({ title = "Travel", content = "No ionizer in this world yet", duration = 3 })
+		end
+	end,
+})
+
+ui.button(travelTab, {
+	name = "To converter",
+	description = "Go to the ion->antimatter machine (Space Station).",
+	callback = function()
+		if not travel.to("Converter") then
+			window:Notify({ title = "Travel", content = "No converter in this world yet", duration = 3 })
 		end
 	end,
 })
@@ -505,6 +539,22 @@ task.spawn(function()
 		if questStat then
 			update("quests", function()
 				questStat:Set(rewards.stats())
+			end)
+		end
+		if machineStat then
+			update("machines", function()
+				-- Where each chain machine lives right now, so the Travel
+				-- tab answers "is it built and where" without a teleport.
+				local ion = util.ionizerPrompt()
+				local conv = util.converterPrompt()
+				local function where(prompt: ProximityPrompt?): string
+					if not prompt then
+						return "missing"
+					end
+					local planet = string.match(prompt:GetFullName(), "Planet(%d)")
+					return planet and util.planetLabel("Planet" .. planet) or "?"
+				end
+				machineStat:Set("Ionizer: " .. where(ion) .. " | Converter: " .. where(conv))
 			end)
 		end
 		if threatStat then

@@ -332,8 +332,8 @@ return function(deps)
 			end
 			tried += 1
 			rotateTeleport(CFrame.new(util.dropToSurface(target.centre)))
-			setPhase("loading " .. target.name)
-			report("moving to " .. target.name .. " - going there to load it", true)
+			setPhase("loading " .. target.label)
+			report("moving to " .. target.label .. " - going there to load it", true)
 			task.wait(1)
 			local n = util.settleRocks(target.centre, config.farm.loadWait, config.farm.streamRadius)
 			root = util.root()
@@ -344,12 +344,12 @@ return function(deps)
 				-- Land precisely on the surface now that the load confirmed
 				-- rocks here, and pin the hold to the landing spot.
 				rotateTeleport(CFrame.new(util.dropToSurface(target.centre)))
-				setPhase("loaded " .. target.name)
-				report(target.name .. " loaded in person: " .. n .. " rocks", true)
+				setPhase("loaded " .. target.label)
+				report(target.label .. " loaded in person: " .. n .. " rocks", true)
 				return true
 			end
 			planetCool[target.name] = os.clock() + config.farm.planetCooldown
-			report(target.name .. ": went there, waited, empty for now - trying another planet", true)
+			report(target.label .. ": went there, waited, empty for now - trying another planet", true)
 		end
 		return false
 	end
@@ -622,11 +622,11 @@ return function(deps)
 					and #util.rocksNear(root.Position, config.farm.streamRadius) > 0
 				then
 					report(
-						"checking " .. preferred.name .. " (best income) before settling here",
+						"checking " .. preferred.label .. " (best income) before settling here",
 						true
 					)
 					rotateTeleport(CFrame.new(util.dropToSurface(preferred.centre)))
-					setPhase("loading " .. preferred.name)
+					setPhase("loading " .. preferred.label)
 					task.wait(1)
 					local n = util.settleRocks(
 						preferred.centre,
@@ -635,11 +635,11 @@ return function(deps)
 					)
 					if n > 0 then
 						rotateTeleport(CFrame.new(util.dropToSurface(preferred.centre)))
-						setPhase("loaded " .. preferred.name)
-						report(preferred.name .. " has " .. n .. " rocks - mining the ion field", true)
+						setPhase("loaded " .. preferred.label)
+						report(preferred.label .. " has " .. n .. " rocks - mining the ion field", true)
 					else
 						planetCool[preferred.name] = os.clock() + config.farm.planetCooldown
-						report(preferred.name .. " is empty right now - staying local", true)
+						report(preferred.label .. " is empty right now - staying local", true)
 					end
 					continue
 				end
