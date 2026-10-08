@@ -130,5 +130,23 @@ return function(deps)
 		end)
 	end
 
+	-- Single-line text input (Gen2 CreateTextBox), guarded like the rest: a
+	-- Rayfield build without the constructor degrades to "no search box"
+	-- instead of killing the menu.
+	function ui.textBox(tab, key: string, props)
+		props = props or {}
+		props.flag = key
+		props.callback = function(value)
+			state.set(key, value)
+		end
+		local handle = guard("textBox", function()
+			return tab:CreateTextBox(props)
+		end)
+		if handle then
+			state.bind(key, handle)
+		end
+		return handle
+	end
+
 	return ui
 end

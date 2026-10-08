@@ -59,6 +59,7 @@ local farm = fetchModule("farm")({ config = config, state = state, util = util }
 local travel = fetchModule("travel")({ config = config, state = state, util = util })
 local rewards = fetchModule("rewards")({ config = config, state = state, util = util })
 local holdmine = fetchModule("holdmine")({ util = util })
+local knowledge = fetchModule("knowledge") -- data table, not a factory
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -96,6 +97,7 @@ end)
 local farmTab = window:CreateTab({ name = "Farm" })
 local espTab = window:CreateTab({ name = "ESP" })
 local travelTab = window:CreateTab({ name = "Travel" })
+local askTab = window:CreateTab({ name = "Assistant" })
 local settingsTab = window:CreateTab({ name = "Settings" })
 
 -- Farm -------------------------------------------------------------------
@@ -313,6 +315,85 @@ ui.button(settingsTab, {
 	description = "Stops every module and destroys the menu.",
 	callback = function()
 		shutdown()
+	end,
+})
+
+--------------------------------------------------------------- assistant
+-- Knowledge base tab (wiki + live measurements, distilled into
+-- src/knowledge.luau). No game state: everything here is safe to browse
+-- while playing.
+
+ui.section(askTab, "Game knowledge (wiki + live measurements)")
+
+local answerCard = ui.text(askTab, {
+	name = "Answer",
+	text = "Pick a topic below or type a question - prices, endings, awaken conditions, story.",
+})
+
+local function setAnswer(text: string)
+	if answerCard then
+		answerCard:Set(text)
+	end
+end
+
+local function showTitle(title: string)
+	local body, cat = knowledge.get(title)
+	if body then
+		setAnswer(title .. "\n[" .. cat .. "]\n" .. body)
+	end
+end
+
+ui.dropdown(askTab, "AskTopic", {
+	name = "Topic",
+	description = "Every entry the assistant knows - grouped from basics to change log.",
+	options = knowledge.topicList(),
+	value = state.get("AskTopic"),
+})
+state.on("AskTopic", function(v)
+	if type(v) == "string" then
+		showTitle(v)
+	end
+end)
+
+local askBox = ui.textBox(askTab, "AskQuery", {
+	name = "Ask anything",
+	description = "Keywords beat sentences: 'pluto terraform', 'ionizer', 'endings', 'prices'.",
+	placeholder = "type a question, then press Ask...",
+})
+if askBox then
+	ui.button(askTab, {
+		name = "Ask",
+		description = "Search the knowledge base for the typed question.",
+		callback = function()
+			local q = state.get("AskQuery")
+			if type(q) ~= "string" or q == "" then
+				setAnswer("Type a question first (or use the Topic dropdown).")
+				return
+			end
+			local hits = knowledge.search(q, 3)
+			if #hits == 0 then
+				setAnswer("Nothing matched '" .. q .. "'.\nTry shorter keywords, or pick a topic from the dropdown.")
+				return
+			end
+			local best = hits[1]
+			local extra = ""
+			if #hits > 1 then
+				extra = "\n\nAlso matching: " .. hits[2].title
+				if hits[3] then
+					extra ..= ", " .. hits[3].title
+				end
+			end
+			setAnswer(best.title .. "\n[" .. best.cat .. "]\n" .. best.body .. extra)
+		end,
+	})
+end
+
+ui.button(askTab, {
+	name = "Surprise me",
+	description = "Show a random entry from the knowledge base.",
+	callback = function()
+		local e = knowledge.random()
+		showTitle(e.title)
 	end,
 })
 
@@ -641,6 +722,8 @@ if getgenv then
 		farm = farm,
 		travel = travel,
 		rewards = rewards,
+		holdmine = holdmine,
+		knowledge = knowledge,
 	}
 end
 
