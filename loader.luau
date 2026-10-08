@@ -58,6 +58,7 @@ local esp = fetchModule("esp")({ config = config, state = state, util = util })
 local farm = fetchModule("farm")({ config = config, state = state, util = util })
 local travel = fetchModule("travel")({ config = config, state = state, util = util })
 local rewards = fetchModule("rewards")({ config = config, state = state, util = util })
+local holdmine = fetchModule("holdmine")({ util = util })
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -444,6 +445,9 @@ esp.sync()
 travel.sync()
 rewards.sync()
 rewards.start()
+-- Hidden hold-to-mine: always on, no GUI control (user decision). Holding
+-- left click swings the equipped pickaxe; see src/holdmine.luau.
+holdmine.start()
 -- Off by default (user decision 2026-10-09): they play with the menu open and
 -- want the game to look normal. Flip it on when the GPU is struggling.
 if state.get("LowerUsage") == nil then
@@ -605,6 +609,7 @@ shutdown = function()
 	esp.stop()
 	travel.stop()
 	rewards.stop()
+	holdmine.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
