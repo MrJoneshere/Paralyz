@@ -63,6 +63,12 @@ local instantprompts = fetchModule("instantprompts")({ util = util })
 local minekey = fetchModule("minekey")({ util = util })
 local promptkey = fetchModule("promptkey")({ util = util })
 local knowledge = fetchModule("knowledge") -- data table, not a factory
+-- Screen shake off at boot, before the window even exists ("waits no
+-- time"): replays the settings row's disable action until the game's
+-- "Anti Screen Shake" object exists; falls back to a local copy. Quiet -
+-- no toast. See src/noshake.luau.
+local noshake = fetchModule("noshake")({ util = util })
+noshake.start()
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -727,6 +733,7 @@ shutdown = function()
 	instantprompts.stop()
 	minekey.stop()
 	promptkey.stop()
+	noshake.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -762,6 +769,7 @@ if getgenv then
 		instantprompts = instantprompts,
 		minekey = minekey,
 		promptkey = promptkey,
+		noshake = noshake,
 		knowledge = knowledge,
 	}
 end

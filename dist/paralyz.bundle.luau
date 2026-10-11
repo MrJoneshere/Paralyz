@@ -2032,13 +2032,26 @@ return knowledge
 -- pickaxe swings while a pickaxe is equipped - "hold-to-mine without
 -- holding", made for going AFK on top of a mining spot.
 --
--- It only ever calls Tool:Activate() - the exact call the auto-farm and
--- hold-to-mine use - with NO delay between swings (user request
--- "absolute no delay mining"): the loop resumes every resumption point,
--- i.e. roughly once per frame, and any server-side debounce simply
--- dedupes the extra calls. Nothing in here moves the character, touches
--- the camera or fires anything itself; the game's own tool logic does
--- the mining.
+-- Zero delay (user: "absolute no delay mining"): the loop resumes every
+-- resumption point (~1 frame); any server-side debounce dedupes the extra
+-- calls on its own.
+--
+-- Stall watchdog + recovery (user: "mining stops for no reason... unequip
+-- and re equip the pickaxe and move 5 studs... the character never gets
+-- out of that 7.5 stud"):
+--   * progress signal = util.juiceCount(); no change for STALL_SECS
+--     while F7 is on = stall -> recovery.
+--   * recovery = UnequipTools -> EquipTool(best pickaxe) -> walk up to
+--     WALK studs in a random direction, hard-clamped inside RADIUS of the
+--     anchor (0.3 margin), bounded by WALK_TIMEOUT.
+--   * anchor = the position where the pickaxe is equipped when F7 goes
+--     on (recaptures only on the next toggle-on, or on the first equip
+--     after toggle-on). The character never leaves that circle: a
+--     throttled boundary check walks it back if physics pushes it out.
+--   * every loop step is pcall-guarded: a Lua error can no longer kill
+--     the task silently (the likely original "stops for no reason").
+--   * plain Humanoid:MoveTo walking only - no teleports, no camera
+--     touches, nothing fired; any walk stops the moment F7 goes off.
 --
 -- Rules kept from holdmine:
 --   * pickaxes only (name contains "pickaxe", same test as util.bestPickaxe).
@@ -2056,35 +2069,191 @@ return function(deps)
 	local minekey = {}
 
 	local KEY = Enum.KeyCode.F7
+	local STALL_SECS = 12 -- no juice gain this long = stall -> recover
+	local WALK = 5 -- recovery step length (studs)
+	local RADIUS = 7.5 -- hard boundary around the anchor point
+	local WALK_TIMEOUT = 4 -- seconds a recovery walk may take
+	local BOUNDARY_EVERY = 0.5 -- boundary check throttle
+	local WATCH_EVERY = 0.25 -- juice watchdog throttle
+	local ERR_WARN_EVERY = 5 -- console warn throttle for loop errors
 
 	local UIS = game:GetService("UserInputService")
+	local Players = game:GetService("Players")
 
 	local listening = false
 	local swinging = false
+	local recovering = false
+	local runId = 0 -- bumped every toggle; stale loops see a mismatch
+	local anchor: Vector3? = nil
 	local conn: RBXScriptConnection? = nil
 
 	local function isPickaxe(tool: Tool): boolean
 		return string.find(string.lower(tool.Name), "pickaxe", 1, true) ~= nil
 	end
 
-	local function swingLoop()
-		while swinging do
-			local tool = util.equippedTool()
-			if tool and isPickaxe(tool) then
-				pcall(function()
-					tool:Activate()
-				end)
+	-- Root part + humanoid of the CURRENT character (nil-safe).
+	local function charParts()
+		local char = Players.LocalPlayer.Character
+		if not char then
+			return nil, nil
+		end
+		return char:FindFirstChild("HumanoidRootPart"), char:FindFirstChildOfClass("Humanoid")
+	end
+
+	local function stopWalk()
+		local _, hum = charParts()
+		if hum then
+			pcall(function()
+				hum:Move(Vector3.zero)
+			end)
+		end
+	end
+
+	-- Stall recovery (the user's fix): flick the tool off/on to reset the
+	-- server's swing echo state, then step to a fresh spot so swings land
+	-- on a new face of the rock - all inside the 7.5-stud circle.
+	local function recover()
+		if recovering or not swinging then
+			return
+		end
+		recovering = true
+		local hrp, hum = charParts()
+		if not (hrp and hum) then
+			recovering = false
+			return
+		end
+		pcall(function()
+			hum:UnequipTools()
+		end)
+		task.wait(0.25)
+		if not swinging then
+			recovering = false
+			return
+		end
+		local pick = util.bestPickaxe()
+		if pick then
+			pcall(function()
+				hum:EquipTool(pick)
+			end)
+		end
+		task.wait(0.25)
+		if not swinging then
+			recovering = false
+			return
+		end
+		local hrp2, hum2 = charParts()
+		local a = anchor
+		if hrp2 and hum2 and a then
+			-- <= WALK studs in a random direction, clamped inside RADIUS
+			local angle = math.random() * math.pi * 2
+			local want = hrp2.Position + Vector3.new(math.cos(angle), 0, math.sin(angle)) * WALK
+			local off = want - a
+			if off.Magnitude > RADIUS then
+				want = a + off.Unit * (RADIUS - 0.3)
 			end
-			-- No delay: bare task.wait() resumes on the next resumption
-			-- point (~1 frame). Any server debounce dedupes on its own.
+			pcall(function()
+				hum2:MoveTo(want)
+			end)
+			local t0 = os.clock()
+			while swinging and os.clock() - t0 < WALK_TIMEOUT do
+				if (hrp2.Position - want).Magnitude < 1 then
+					break
+				end
+				task.wait(0.1)
+			end
+			pcall(function()
+				hum2:Move(Vector3.zero)
+			end)
+		end
+		recovering = false
+	end
+
+	local function swingLoop(myGen: number)
+		local lastJuice = nil
+		local lastWatch = 0
+		local lastBoundary = 0
+		local lastProgress = os.clock()
+		local lastErrAt = 0
+		do
+			local ok, j = pcall(util.juiceCount)
+			if ok then
+				lastJuice = j
+			end
+		end
+		while swinging and runId == myGen do
+			local ok, err = pcall(function()
+				local hrp, hum = charParts()
+				local now = os.clock()
+
+				-- F7 on without a pickaxe, equipped later: anchor there.
+				local tool = util.equippedTool()
+				if tool and isPickaxe(tool) then
+					if not anchor and hrp then
+						anchor = hrp.Position
+					end
+					tool:Activate()
+				end
+
+				-- Juice watchdog: no progress for STALL_SECS -> recover.
+				if now - lastWatch >= WATCH_EVERY then
+					lastWatch = now
+					local okJ, j = pcall(util.juiceCount)
+					if okJ and type(j) == "number" then
+						if lastJuice == nil then
+							lastJuice = j
+						elseif j ~= lastJuice then
+							lastJuice = j
+							lastProgress = now
+						end
+						if now - lastProgress >= STALL_SECS then
+							lastProgress = now -- one recovery per window
+							task.spawn(recover)
+						end
+					end
+				end
+
+				-- Boundary: never beyond RADIUS from the anchor.
+				if hrp and hum and anchor and not recovering then
+					if now - lastBoundary >= BOUNDARY_EVERY then
+						lastBoundary = now
+						local dir = hrp.Position - anchor
+						if dir.Magnitude > RADIUS then
+							pcall(function()
+								hum:MoveTo(anchor + dir.Unit * (RADIUS - 0.3))
+							end)
+						end
+					end
+				end
+			end)
+			if not ok and os.clock() - lastErrAt >= ERR_WARN_EVERY then
+				lastErrAt = os.clock()
+				warn("[Paralyz] minekey loop error: " .. tostring(err))
+			end
 			task.wait()
 		end
 	end
 
 	local function toggle()
+		runId = runId + 1
 		swinging = not swinging
 		if swinging then
-			task.spawn(swingLoop)
+			-- Fresh circle per ON: the anchor is where the pickaxe is
+			-- equipped when the user starts AFK-mining.
+			anchor = nil
+			local tool = util.equippedTool()
+			if tool and isPickaxe(tool) then
+				local hrp = charParts()
+				if hrp then
+					anchor = hrp.Position
+				end
+			end
+			local myGen = runId
+			task.spawn(function()
+				swingLoop(myGen)
+			end)
+		else
+			anchor = nil
+			stopWalk()
 		end
 		if util and util.notify then
 			util.notify("Auto-mine", swinging and "ON - swinging while a pickaxe is equipped" or "OFF")
@@ -2111,8 +2280,12 @@ return function(deps)
 	end
 
 	function minekey.stop()
+		runId = runId + 1
 		swinging = false
+		recovering = false
 		listening = false
+		anchor = nil
+		stopWalk()
 		if conn then
 			conn:Disconnect()
 			conn = nil
@@ -2127,7 +2300,186 @@ return function(deps)
 		return swinging
 	end
 
+	function minekey.getAnchor()
+		return anchor
+	end
+
 	return minekey
+end
+]==],
+	["noshake"] = [==[
+--!strict
+-- Paralyz / src/noshake.luau
+-- Auto-disable screen shake at script execution (user request 2026-10-12):
+-- "whenever the script is executed it waits no time and just turns off
+-- screen shake from settings so i dont need to do that, in any place".
+-- Quiet by design - no toast, it just happens.
+--
+-- How the game does it (reverse-engineered read-only, subplace index):
+--   * Settings row click [docId 39]:
+--       if Display.Text == "Enabled" then
+--           Display.Text = "Disabled"
+--           Image = <disabled graphic>
+--           Events.CameraShake:FireServer(true)   <- the DISABLE action
+--       end
+--   * The server answers by parenting a NumberValue "Anti Screen Shake"
+--     into the player.
+--   * PlayerGui ScreenGui.CameraShake [docId 36] skips EVERY shake while
+--     that object exists:
+--       if not LocalPlayer:FindFirstChild("Anti Screen Shake") then
+--           u18:ShakeOnce(...)
+--       end
+--   * The object is never created by any indexed game script, so it is
+--     wiped with the player on rejoin -> the user's manual every-session
+--     chore. This module replays their exact manual action instead.
+--
+-- Implementation: if the object is missing, FireServer(true) - the same
+-- remote call the settings button makes - then verify it appeared (3s).
+-- If the server never answers, parent the same NumberValue client-side:
+-- the only consumer checks presence, so the effect is identical. The row
+-- UI (Display "Disabled" + matching image) is synced so the settings menu
+-- shows the true state when opened later. Boot-time only: if you later
+-- deliberately re-enable shake in settings, this does not fight you.
+
+return function(deps)
+	local util = deps.util
+
+	local noshake = {}
+
+	local Players = game:GetService("Players")
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+	local OBJ = "Anti Screen Shake"
+	local DISABLED_IMAGE = "rbxassetid://124658924075155" -- row image when Display = "Disabled"
+
+	local running = false
+
+	local function exists(): boolean
+		return Players.LocalPlayer:FindFirstChild(OBJ) ~= nil
+	end
+
+	-- Replay the settings row's disable click exactly.
+	local function fireDisable(): boolean
+		local events = ReplicatedStorage:FindFirstChild("Events")
+		local remote = events and events:FindFirstChild("CameraShake")
+		if not remote then
+			return false
+		end
+		return pcall(function()
+			remote:FireServer(true)
+		end)
+	end
+
+	-- Fallback: parent the same object locally. CameraShake only checks
+	-- presence, so a client-side copy fully blocks the shake event.
+	local function makeLocal()
+		if exists() then
+			return
+		end
+		pcall(function()
+			local v = Instance.new("NumberValue")
+			v.Name = OBJ
+			v.Value = 0
+			v.Parent = Players.LocalPlayer
+		end)
+	end
+
+	-- Keep the settings row honest: Display "Disabled" + its image, so
+	-- opening the menu later shows the real state. Purely cosmetic and
+	-- fully guarded - the settings GUI may not exist in every place.
+	local function syncRow()
+		pcall(function()
+			local plrGui = Players.LocalPlayer.PlayerGui
+			local gui = plrGui:FindFirstChild("Settings")
+			local frame = gui and gui:FindFirstChild("Frame")
+			local main = frame and frame:FindFirstChild("settings main frame")
+			if not main then
+				return
+			end
+			local label = nil
+			for _, d in ipairs(main:GetDescendants()) do
+				if string.find(string.lower(d.Name), "shake", 1, true) then
+					label = d
+					break
+				end
+			end
+			if not label or not label:IsA("GuiObject") then
+				return
+			end
+			local best = nil
+			local bestDy = 0.12
+			for _, d in ipairs(main:GetChildren()) do
+				if d:IsA("Frame") then
+					local dy = math.abs(d.Position.Y.Scale - label.Position.Y.Scale)
+					if dy <= bestDy then
+						best = d
+						bestDy = dy
+					end
+				end
+			end
+			if not best then
+				return
+			end
+			local btn = nil
+			for _, c in ipairs(best:GetDescendants()) do
+				if c:IsA("ImageButton") then
+					btn = c
+					break
+				end
+			end
+			if not btn then
+				return
+			end
+			btn.Image = DISABLED_IMAGE
+			local disp = btn:FindFirstChild("Display")
+			if disp and disp:IsA("TextLabel") then
+				disp.Text = "Disabled"
+			end
+		end)
+	end
+
+	local function ensure()
+		if not exists() then
+			fireDisable()
+			local t0 = os.clock()
+			while not exists() and os.clock() - t0 < 3 do
+				task.wait(0.1)
+			end
+			if not exists() then
+				makeLocal()
+			end
+		end
+		syncRow()
+	end
+
+	-- Called by the loader immediately after module fetch - before the
+	-- window even exists ("waits no time").
+	function noshake.start()
+		if running then
+			return
+		end
+		running = true
+		task.spawn(function()
+			local ok, err = pcall(ensure)
+			if not ok then
+				warn("[Paralyz] noshake failed: " .. tostring(err))
+			end
+		end)
+	end
+
+	function noshake.stop()
+		running = false
+	end
+
+	function noshake.isRunning(): boolean
+		return running
+	end
+
+	function noshake.isOff(): boolean
+		return exists()
+	end
+
+	return noshake
 end
 ]==],
 	["perf"] = [==[
@@ -4356,6 +4708,12 @@ local instantprompts = fetchModule("instantprompts")({ util = util })
 local minekey = fetchModule("minekey")({ util = util })
 local promptkey = fetchModule("promptkey")({ util = util })
 local knowledge = fetchModule("knowledge") -- data table, not a factory
+-- Screen shake off at boot, before the window even exists ("waits no
+-- time"): replays the settings row's disable action until the game's
+-- "Anti Screen Shake" object exists; falls back to a local copy. Quiet -
+-- no toast. See src/noshake.luau.
+local noshake = fetchModule("noshake")({ util = util })
+noshake.start()
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -5020,6 +5378,7 @@ shutdown = function()
 	instantprompts.stop()
 	minekey.stop()
 	promptkey.stop()
+	noshake.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -5055,6 +5414,7 @@ if getgenv then
 		instantprompts = instantprompts,
 		minekey = minekey,
 		promptkey = promptkey,
+		noshake = noshake,
 		knowledge = knowledge,
 	}
 end
