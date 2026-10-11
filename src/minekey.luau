@@ -5,15 +5,19 @@
 -- holding", made for going AFK on top of a mining spot.
 --
 -- It only ever calls Tool:Activate() - the exact call the auto-farm and
--- hold-to-mine use - at the same proven 0.15s floor. Nothing in here
--- moves the character, touches the camera or fires anything itself; the
--- game's own tool logic does the mining.
+-- hold-to-mine use - with NO delay between swings (user request
+-- "absolute no delay mining"): the loop resumes every resumption point,
+-- i.e. roughly once per frame, and any server-side debounce simply
+-- dedupes the extra calls. Nothing in here moves the character, touches
+-- the camera or fires anything itself; the game's own tool logic does
+-- the mining.
 --
 -- Rules kept from holdmine:
 --   * pickaxes only (name contains "pickaxe", same test as util.bestPickaxe).
 --   * no pickaxe equipped = the loop idles (swings nothing).
 --   * stop() on unload kills the loop for good.
---   * gameProcessed keys are ignored (typing in chat never toggles).
+--   * only a focused text box blocks the F7 toggle (GUIs claiming keys
+--     must not eat it - see start()).
 --
 -- Hidden feature, no GUI entry (user's choice); a toast reports the state
 -- on every toggle so it is never a mystery.
@@ -24,7 +28,6 @@ return function(deps)
 	local minekey = {}
 
 	local KEY = Enum.KeyCode.F7
-	local CADENCE = 0.15 -- seconds between swings (proven clamp floor)
 
 	local UIS = game:GetService("UserInputService")
 
@@ -44,7 +47,9 @@ return function(deps)
 					tool:Activate()
 				end)
 			end
-			task.wait(CADENCE)
+			-- No delay: bare task.wait() resumes on the next resumption
+			-- point (~1 frame). Any server debounce dedupes on its own.
+			task.wait()
 		end
 	end
 

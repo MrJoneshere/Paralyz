@@ -2033,15 +2033,19 @@ return knowledge
 -- holding", made for going AFK on top of a mining spot.
 --
 -- It only ever calls Tool:Activate() - the exact call the auto-farm and
--- hold-to-mine use - at the same proven 0.15s floor. Nothing in here
--- moves the character, touches the camera or fires anything itself; the
--- game's own tool logic does the mining.
+-- hold-to-mine use - with NO delay between swings (user request
+-- "absolute no delay mining"): the loop resumes every resumption point,
+-- i.e. roughly once per frame, and any server-side debounce simply
+-- dedupes the extra calls. Nothing in here moves the character, touches
+-- the camera or fires anything itself; the game's own tool logic does
+-- the mining.
 --
 -- Rules kept from holdmine:
 --   * pickaxes only (name contains "pickaxe", same test as util.bestPickaxe).
 --   * no pickaxe equipped = the loop idles (swings nothing).
 --   * stop() on unload kills the loop for good.
---   * gameProcessed keys are ignored (typing in chat never toggles).
+--   * only a focused text box blocks the F7 toggle (GUIs claiming keys
+--     must not eat it - see start()).
 --
 -- Hidden feature, no GUI entry (user's choice); a toast reports the state
 -- on every toggle so it is never a mystery.
@@ -2052,7 +2056,6 @@ return function(deps)
 	local minekey = {}
 
 	local KEY = Enum.KeyCode.F7
-	local CADENCE = 0.15 -- seconds between swings (proven clamp floor)
 
 	local UIS = game:GetService("UserInputService")
 
@@ -2072,7 +2075,9 @@ return function(deps)
 					tool:Activate()
 				end)
 			end
-			task.wait(CADENCE)
+			-- No delay: bare task.wait() resumes on the next resumption
+			-- point (~1 frame). Any server debounce dedupes on its own.
+			task.wait()
 		end
 	end
 
@@ -2211,6 +2216,140 @@ return function(deps)
 	end
 
 	return perf
+end
+]==],
+	["promptkey"] = [==[
+--!strict
+-- Paralyz / src/promptkey.luau
+-- F8 prompt auto-fire (user request 2026-10-12): while toggled on, the
+-- nearest enabled ProximityPrompt in range is fired every 0.1s - bulk
+-- converting at the Omega/Ion machines without spamming the key.
+--
+-- Why a toggle instead of "repeat while the prompt key is held": prompt
+-- keys are per-prompt (each prompt carries its own KeyboardKeyCode), and
+-- blind auto-repeat on EVERY held prompt would also double-fire purchase
+-- prompts (hold-to-buy = multiple buys). A conscious toggle standing at
+-- the machine is safe and needs no key detection at all.
+--
+-- Uses the same fireproximityprompt builtin as instantprompts. Never moves
+-- the character. Nearest = closest enabled prompt within its own
+-- MaxActivationDistance of the character root.
+
+return function(deps)
+	local util = deps.util
+
+	local promptkey = {}
+
+	local KEY = Enum.KeyCode.F8
+	local RATE = 0.1 -- seconds between auto-fires
+
+	local UIS = game:GetService("UserInputService")
+	local Players = game:GetService("Players")
+
+	local listening = false
+	local autofiring = false
+	local conn: RBXScriptConnection? = nil
+
+	local function nearestPrompt(): ProximityPrompt?
+		local plr = Players.LocalPlayer
+		local char = plr.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then
+			return nil
+		end
+		local best: ProximityPrompt? = nil
+		local bestDist = math.huge
+		for _, d in ipairs(workspace:GetDescendants()) do
+			if d:IsA("ProximityPrompt") and d.Enabled and d.MaxActivationDistance > 0 then
+				-- Adornee is the prompt's PARENT (BasePart / Attachment / Model).
+				local pos = nil
+				local par = d.Parent
+				if par then
+					if par:IsA("BasePart") then
+						pos = par.Position
+					elseif par:IsA("Attachment") then
+						pos = par.WorldPosition
+					else
+						local bp = par:FindFirstChildWhichIsA("BasePart", true)
+						if bp then
+							pos = bp.Position
+						end
+					end
+				end
+				if pos then
+					local dist = (pos - root.Position).Magnitude
+					if dist <= d.MaxActivationDistance and dist < bestDist then
+						bestDist = dist
+						best = d
+					end
+				end
+			end
+		end
+		return best
+	end
+
+	local function fireLoop()
+		while autofiring do
+			local p = nearestPrompt()
+			if p then
+				pcall(fireproximityprompt, p)
+			end
+			task.wait(RATE)
+		end
+	end
+
+	local function toggle()
+		autofiring = not autofiring
+		if autofiring then
+			task.spawn(fireLoop)
+		end
+		if util and util.notify then
+			util.notify("Prompt auto", autofiring and "ON - firing the nearest prompt 10x/s" or "OFF")
+		end
+	end
+
+	function promptkey.start()
+		if listening then
+			return
+		end
+		if type(fireproximityprompt) ~= "function" then
+			if util and util.notify then
+				util.notify("Prompt auto", "this executor has no fireproximityprompt")
+			end
+			return
+		end
+		listening = true
+		-- Not gated on gameProcessed (same lesson as minekey F7): GUIs claim
+		-- keys and mark them processed; only a focused text box blocks F8.
+		conn = UIS.InputBegan:Connect(function(input)
+			if input.KeyCode ~= KEY then
+				return
+			end
+			if UIS:GetFocusedTextBox() then
+				return
+			end
+			toggle()
+		end)
+	end
+
+	function promptkey.stop()
+		autofiring = false
+		listening = false
+		if conn then
+			conn:Disconnect()
+			conn = nil
+		end
+	end
+
+	function promptkey.isRunning(): boolean
+		return listening
+	end
+
+	function promptkey.isFiring(): boolean
+		return autofiring
+	end
+
+	return promptkey
 end
 ]==],
 	["rewards"] = [==[
@@ -4215,6 +4354,7 @@ local rewards = fetchModule("rewards")({ config = config, state = state, util = 
 local holdmine = fetchModule("holdmine")({ util = util })
 local instantprompts = fetchModule("instantprompts")({ util = util })
 local minekey = fetchModule("minekey")({ util = util })
+local promptkey = fetchModule("promptkey")({ util = util })
 local knowledge = fetchModule("knowledge") -- data table, not a factory
 
 --------------------------------------------------------------- Rayfield Gen2
@@ -4705,6 +4845,9 @@ holdmine.start()
 -- Keybind auto-mine: F7 toggles continuous swings while a pickaxe is
 -- equipped (hidden, toast reports state); see src/minekey.luau.
 minekey.start()
+-- Prompt auto-fire: F8 toggles 10x/s firing of the nearest in-range
+-- ProximityPrompt (hidden, toast reports state); see src/promptkey.luau.
+promptkey.start()
 -- Off by default (user decision 2026-10-09): they play with the menu open and
 -- want the game to look normal. Flip it on when the GPU is struggling.
 if state.get("LowerUsage") == nil then
@@ -4876,6 +5019,7 @@ shutdown = function()
 	holdmine.stop()
 	instantprompts.stop()
 	minekey.stop()
+	promptkey.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -4910,6 +5054,7 @@ if getgenv then
 		holdmine = holdmine,
 		instantprompts = instantprompts,
 		minekey = minekey,
+		promptkey = promptkey,
 		knowledge = knowledge,
 	}
 end

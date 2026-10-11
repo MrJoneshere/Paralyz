@@ -61,6 +61,7 @@ local rewards = fetchModule("rewards")({ config = config, state = state, util = 
 local holdmine = fetchModule("holdmine")({ util = util })
 local instantprompts = fetchModule("instantprompts")({ util = util })
 local minekey = fetchModule("minekey")({ util = util })
+local promptkey = fetchModule("promptkey")({ util = util })
 local knowledge = fetchModule("knowledge") -- data table, not a factory
 
 --------------------------------------------------------------- Rayfield Gen2
@@ -551,6 +552,9 @@ holdmine.start()
 -- Keybind auto-mine: F7 toggles continuous swings while a pickaxe is
 -- equipped (hidden, toast reports state); see src/minekey.luau.
 minekey.start()
+-- Prompt auto-fire: F8 toggles 10x/s firing of the nearest in-range
+-- ProximityPrompt (hidden, toast reports state); see src/promptkey.luau.
+promptkey.start()
 -- Off by default (user decision 2026-10-09): they play with the menu open and
 -- want the game to look normal. Flip it on when the GPU is struggling.
 if state.get("LowerUsage") == nil then
@@ -722,6 +726,7 @@ shutdown = function()
 	holdmine.stop()
 	instantprompts.stop()
 	minekey.stop()
+	promptkey.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -756,6 +761,7 @@ if getgenv then
 		holdmine = holdmine,
 		instantprompts = instantprompts,
 		minekey = minekey,
+		promptkey = promptkey,
 		knowledge = knowledge,
 	}
 end
