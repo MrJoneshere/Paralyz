@@ -60,6 +60,7 @@ local travel = fetchModule("travel")({ config = config, state = state, util = ut
 local rewards = fetchModule("rewards")({ config = config, state = state, util = util })
 local holdmine = fetchModule("holdmine")({ util = util })
 local instantprompts = fetchModule("instantprompts")({ util = util })
+local minekey = fetchModule("minekey")({ util = util })
 local knowledge = fetchModule("knowledge") -- data table, not a factory
 
 --------------------------------------------------------------- Rayfield Gen2
@@ -547,6 +548,9 @@ rewards.start()
 -- Hidden hold-to-mine: always on, no GUI control (user decision). Holding
 -- left click swings the equipped pickaxe; see src/holdmine.luau.
 holdmine.start()
+-- Keybind auto-mine: F7 toggles continuous swings while a pickaxe is
+-- equipped (hidden, toast reports state); see src/minekey.luau.
+minekey.start()
 -- Off by default (user decision 2026-10-09): they play with the menu open and
 -- want the game to look normal. Flip it on when the GPU is struggling.
 if state.get("LowerUsage") == nil then
@@ -717,6 +721,7 @@ shutdown = function()
 	rewards.stop()
 	holdmine.stop()
 	instantprompts.stop()
+	minekey.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -750,6 +755,7 @@ if getgenv then
 		rewards = rewards,
 		holdmine = holdmine,
 		instantprompts = instantprompts,
+		minekey = minekey,
 		knowledge = knowledge,
 	}
 end
