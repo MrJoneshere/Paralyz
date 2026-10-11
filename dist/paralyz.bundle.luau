@@ -2091,13 +2091,17 @@ return function(deps)
 			return
 		end
 		listening = true
-		conn = UIS.InputBegan:Connect(function(input, gameProcessed)
-			if gameProcessed then
+		-- Deliberately NOT gated on gameProcessed: GUIs and other hubs (IY)
+		-- claim keys and Roblox flags those presses processed, which silently
+		-- ate F7. Only a focused text box (typing) blocks the toggle now.
+		conn = UIS.InputBegan:Connect(function(input)
+			if input.KeyCode ~= KEY then
 				return
 			end
-			if input.KeyCode == KEY then
-				toggle()
+			if UIS:GetFocusedTextBox() then
+				return
 			end
+			toggle()
 		end)
 	end
 
