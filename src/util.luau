@@ -949,16 +949,20 @@ return function(deps)
 	})
 
 	local function ownerAlive(env: any, key: string): boolean
-		local beat = env["ParalyzBeat_" .. key]
-		if beat == nil then
+		-- .Connected IS the liveness bit: live-reload's teardown disconnects
+		-- the previous run's raw connections (LocalPlayer.Idled going 1 -> 0
+		-- across a reload proved it), and RBXScriptConnection.Disconnect()
+		-- flips this flag. Synchronous - deliberately NOT a Fire() echo,
+		-- because this game runs SignalBehavior.Deferred: Fire() only runs
+		-- the handler after a yield, which would read as "dead" every time.
+		local conn = env["ParalyzBeatConn_" .. key]
+		if conn == nil then
 			return false
 		end
-		local marker = {}
-		env["ParalyzProbe_" .. key] = marker
-		local ok = pcall(function()
-			beat:Fire()
+		local ok, connected = pcall(function()
+			return conn.Connected
 		end)
-		return ok and env["ParalyzResp_" .. key] == marker
+		return ok and connected == true
 	end
 
 	local function claimChannel(env: any, key: string, impl: any)
