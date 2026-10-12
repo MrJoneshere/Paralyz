@@ -77,6 +77,11 @@ flystand.start()
 -- momentum) - the fix for "fly stops = slow fall"; see src/hover.luau.
 local hover = fetchModule("hover")({ util = util })
 hover.start()
+-- Safe zone: F5 teleports to the emptiest far-away planet platform and
+-- back - lets the assistant test drops/dupes while the user is AFK;
+-- see src/safezone.luau.
+local safezone = fetchModule("safezone")({ util = util })
+safezone.start()
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -744,6 +749,7 @@ shutdown = function()
 	noshake.stop()
 	flystand.stop()
 	hover.stop()
+	safezone.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -782,6 +788,7 @@ if getgenv then
 		noshake = noshake,
 		flystand = flystand,
 		hover = hover,
+		safezone = safezone,
 		knowledge = knowledge,
 	}
 end
