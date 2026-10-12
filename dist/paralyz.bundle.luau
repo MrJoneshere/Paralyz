@@ -2395,6 +2395,35 @@ local entries = {
 			.. "(no client listener attached).",
 	},
 	{
+		id = "hub-gpu-map",
+		cat = "Hub",
+		title = "GPU usage: what actually draws (measured)",
+		keys = "gpu usage lower usage performance bloom depth of field hud screen gui culling fps visual change",
+		body = "Measured 2026-10-12 on the RX 590 in the main place (Windows GPU "
+			.. "counters, 3D engine): ~41% total = visible scene/terrain/sky ~27, "
+			.. "HUD/UI pass ~7 (32 ScreenGuis, only 6 of them draw pixels), Bloom + "
+			.. "DepthOfField ~7. LowerUsage's frustum culling saves ~0% on its own - "
+			.. "the engine already skips off-screen parts (hiding all 3406 parts did "
+			.. "NOT drop usage). Zero-visual-change GPU saving is therefore maxed "
+			.. "out; the only bigger levers are visible tradeoffs: Bloom/DOF off "
+			.. "(~7 pts), hiding the HUD (~7 pts), lower quality or a frame cap - "
+			.. "all left OFF unless you enable them yourself.",
+	},
+	{
+		id = "hub-anti-idle",
+		cat = "Hub",
+		title = "Anti idle: surviving the 20-minute kick",
+		keys = "anti idle afk kick disconnected inactivity 20 minutes antiafk idle kick",
+		body = "Roblox kicks an idle client after ~20 minutes without input. Settings "
+			.. "-> Anti idle (ON by default) answers Players.LocalPlayer.Idled with "
+			.. "VirtualUser:CaptureController + an in-capture right-click, which "
+			.. "cancels the kick client-side - no keys pressed, no camera motion, no "
+			.. "remotes fired. It cancelled a real kick live on 2026-10-12; a second "
+			.. "kick slipped through only because a broken deploy had left the "
+			.. "connection unconnected (fixed by the v0.2.1 ownership channel: every "
+			.. "reload now re-verifies the listener is actually alive).",
+	},
+	{
 		id = "changelog-balance",
 		cat = "Change Log",
 		title = "Balance changes worth knowing",
