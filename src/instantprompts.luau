@@ -37,6 +37,15 @@ return function(deps)
 			end
 			return
 		end
+		do
+			-- Reload-safety: stacked hold-began connections multi-fire
+			-- every prompt. Oldest generation owns it forever.
+			local env: any = getgenv()
+			if env["ParalyzOwn_conn_instantprompts"] then
+				return
+			end
+			env["ParalyzOwn_conn_instantprompts"] = true
+		end
 		conn = PPS.PromptButtonHoldBegan:Connect(fire)
 	end
 

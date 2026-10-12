@@ -454,6 +454,19 @@ return function(deps)
 	--------------------------------------------------------------- run loop
 	local scanConn: thread? = nil
 	local drawConn: RBXScriptConnection? = nil
+	-- Cross-reload generation (see perf.luau): old scan loops exit when a
+	-- newer generation claims, so reloads stop stacking 0.25s scanners.
+	local GEN_KEY = "ParalyzGen_esp"
+	local function claimGen(): number
+		local env: any = getgenv()
+		local g = (env[GEN_KEY] or 0) + 1
+		env[GEN_KEY] = g
+		return g
+	end
+	local function genAlive(g: number): boolean
+		local env: any = getgenv()
+		return env[GEN_KEY] == g
+	end
 
 	local function start()
 		if drawConn then
@@ -498,7 +511,8 @@ return function(deps)
 		end)
 
 		scanConn = task.spawn(function()
-			while enabled do
+			local gen = claimGen()
+			while enabled and genAlive(gen) do
 				pcall(scan)
 				task.wait(config.esp.refresh)
 			end
@@ -1411,8 +1425,20 @@ return function(deps)
 	local running = false
 	local CHECK = 0.1
 
-	local function watch()
-		while running do
+	local GEN_KEY = "ParalyzGen_flystand"
+	local function claimGen(): number
+		local env: any = getgenv()
+		local g = (env[GEN_KEY] or 0) + 1
+		env[GEN_KEY] = g
+		return g
+	end
+	local function genAlive(g: number): boolean
+		local env: any = getgenv()
+		return env[GEN_KEY] == g
+	end
+
+	local function watch(gen: number)
+		while running and genAlive(gen) do
 			task.wait(CHECK)
 			if not running then
 				break
@@ -1447,7 +1473,10 @@ return function(deps)
 			return
 		end
 		running = true
-		task.spawn(watch)
+		local gen = claimGen()
+		task.spawn(function()
+			watch(gen)
+		end)
 	end
 
 	function flystand.stop()
@@ -1738,6 +1767,15 @@ return function(deps)
 				util.notify("Instant Prompts", "this executor has no fireproximityprompt")
 			end
 			return
+		end
+		do
+			-- Reload-safety: stacked hold-began connections multi-fire
+			-- every prompt. Oldest generation owns it forever.
+			local env: any = getgenv()
+			if env["ParalyzOwn_conn_instantprompts"] then
+				return
+			end
+			env["ParalyzOwn_conn_instantprompts"] = true
 		end
 		conn = PPS.PromptButtonHoldBegan:Connect(fire)
 	end
@@ -3998,8 +4036,20 @@ return function(deps)
 	local passPending = false
 	local hangNotified = false
 
-	local function pollLoop()
-		while running do
+	local GEN_KEY = "ParalyzGen_rewards"
+	local function claimGen(): number
+		local env: any = getgenv()
+		local g = (env[GEN_KEY] or 0) + 1
+		env[GEN_KEY] = g
+		return g
+	end
+	local function genAlive(g: number): boolean
+		local env: any = getgenv()
+		return env[GEN_KEY] == g
+	end
+
+	local function pollLoop(gen: number)
+		while running and genAlive(gen) do
 			if state.enabled("AutoRewards") then
 				if passPending then
 					if not hangNotified then
@@ -4036,7 +4086,10 @@ return function(deps)
 		end
 		running = true
 		startPlaytime()
-		task.spawn(pollLoop)
+		local gen = claimGen()
+		task.spawn(function()
+			pollLoop(gen)
+		end)
 		return true
 	end
 
@@ -4238,6 +4291,15 @@ return function(deps)
 			return
 		end
 		listening = true
+		do
+			-- Reload-safety: stacked CharacterAdded handlers all fire on
+			-- death. Oldest generation owns it forever.
+			local env: any = getgenv()
+			if env["ParalyzOwn_conn_safezone"] then
+				return
+			end
+			env["ParalyzOwn_conn_safezone"] = true
+		end
 		-- No keybind (user order): the Travel tab toggle owns on/off.
 		charConn = Players.LocalPlayer.CharacterAdded:Connect(function()
 			if away then

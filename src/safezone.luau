@@ -174,6 +174,15 @@ return function(deps)
 			return
 		end
 		listening = true
+		do
+			-- Reload-safety: stacked CharacterAdded handlers all fire on
+			-- death. Oldest generation owns it forever.
+			local env: any = getgenv()
+			if env["ParalyzOwn_conn_safezone"] then
+				return
+			end
+			env["ParalyzOwn_conn_safezone"] = true
+		end
 		-- No keybind (user order): the Travel tab toggle owns on/off.
 		charConn = Players.LocalPlayer.CharacterAdded:Connect(function()
 			if away then

@@ -290,6 +290,19 @@ return function(deps)
 	--------------------------------------------------------------- run loop
 	local scanConn: thread? = nil
 	local drawConn: RBXScriptConnection? = nil
+	-- Cross-reload generation (see perf.luau): old scan loops exit when a
+	-- newer generation claims, so reloads stop stacking 0.25s scanners.
+	local GEN_KEY = "ParalyzGen_esp"
+	local function claimGen(): number
+		local env: any = getgenv()
+		local g = (env[GEN_KEY] or 0) + 1
+		env[GEN_KEY] = g
+		return g
+	end
+	local function genAlive(g: number): boolean
+		local env: any = getgenv()
+		return env[GEN_KEY] == g
+	end
 
 	local function start()
 		if drawConn then
@@ -334,7 +347,8 @@ return function(deps)
 		end)
 
 		scanConn = task.spawn(function()
-			while enabled do
+			local gen = claimGen()
+			while enabled and genAlive(gen) do
 				pcall(scan)
 				task.wait(config.esp.refresh)
 			end

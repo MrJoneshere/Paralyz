@@ -166,8 +166,20 @@ return function(deps)
 	local passPending = false
 	local hangNotified = false
 
-	local function pollLoop()
-		while running do
+	local GEN_KEY = "ParalyzGen_rewards"
+	local function claimGen(): number
+		local env: any = getgenv()
+		local g = (env[GEN_KEY] or 0) + 1
+		env[GEN_KEY] = g
+		return g
+	end
+	local function genAlive(g: number): boolean
+		local env: any = getgenv()
+		return env[GEN_KEY] == g
+	end
+
+	local function pollLoop(gen: number)
+		while running and genAlive(gen) do
 			if state.enabled("AutoRewards") then
 				if passPending then
 					if not hangNotified then
@@ -204,7 +216,10 @@ return function(deps)
 		end
 		running = true
 		startPlaytime()
-		task.spawn(pollLoop)
+		local gen = claimGen()
+		task.spawn(function()
+			pollLoop(gen)
+		end)
 		return true
 	end
 

@@ -31,8 +31,20 @@ return function(deps)
 	local running = false
 	local CHECK = 0.1
 
-	local function watch()
-		while running do
+	local GEN_KEY = "ParalyzGen_flystand"
+	local function claimGen(): number
+		local env: any = getgenv()
+		local g = (env[GEN_KEY] or 0) + 1
+		env[GEN_KEY] = g
+		return g
+	end
+	local function genAlive(g: number): boolean
+		local env: any = getgenv()
+		return env[GEN_KEY] == g
+	end
+
+	local function watch(gen: number)
+		while running and genAlive(gen) do
 			task.wait(CHECK)
 			if not running then
 				break
@@ -67,7 +79,10 @@ return function(deps)
 			return
 		end
 		running = true
-		task.spawn(watch)
+		local gen = claimGen()
+		task.spawn(function()
+			watch(gen)
+		end)
 	end
 
 	function flystand.stop()
