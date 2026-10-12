@@ -89,8 +89,35 @@ return function(deps)
 					end
 				end
 				if not skip then
+					local okTr, tr = pcall(function()
+						return part.Transparency
+					end)
+					if okTr and (tr or 0) >= 1 then
+						skip = true -- already invisible: nothing to save
+					end
+				end
+				if not skip then
 					table.insert(fresh, part)
 				end
+			end
+		end
+		-- Nearest first: near parts refresh every slice, so any pop-in
+		-- lag only ever affects far geometry (turning fix).
+		local camNow = workspace.CurrentCamera
+		if camNow then
+			local campos = camNow.CFrame.Position
+			pcall(table.sort, fresh, function(a: BasePart, b: BasePart): boolean
+				return (a.Position - campos).Magnitude < (b.Position - campos).Magnitude
+			end)
+		end
+		-- Purge destroyed parts from the hidden set (keeps the count honest).
+		for part, _ in pairs(hidden) do
+			local okAlive = pcall(function()
+				return part.Parent ~= nil
+			end)
+			if not okAlive then
+				hidden[part] = nil
+				hiddenCount -= 1
 			end
 		end
 		registry = fresh
@@ -120,8 +147,12 @@ return function(deps)
 		local halfV = math.rad(cam.FieldOfView / 2 + o.marginDeg)
 		local halfH = math.atan(math.tan(math.rad(cam.FieldOfView / 2)) * aspect) + math.rad(o.marginDeg)
 		local rel = cam.CFrame:PointToObjectSpace(part.Position)
+		if rel.Z > 0 then
+			return true -- behind the camera: never visible (this was the
+			-- leak - everything behind you kept rendering)
+		end
 		if rel.Z >= -o.near then
-			return false -- behind or beside the camera plane
+			return false -- beside the near plane: stay shown
 		end
 		local depth = -rel.Z
 		return math.abs(rel.X / depth) > math.tan(halfH) or math.abs(rel.Y / depth) > math.tan(halfV)

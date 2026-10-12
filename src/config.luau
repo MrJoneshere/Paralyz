@@ -140,8 +140,8 @@ return {
 		cullNearDist = 150, -- inside this: always rendered (no pop-in)
 		cullMaxSize = 120, -- bigger than this: never touched (planets)
 		cullMarginDeg = 10, -- frustum border absorbing fast camera moves
-		cullBudget = 400, -- parts tested per slice (optimizer stays cheap)
-		cullSliceSecs = 0.25, -- seconds between slices
+		cullBudget = 250, -- parts tested per slice (optimizer stays cheap)
+		cullSliceSecs = 0.12, -- seconds between slices (fast re-show on turns)
 		cullRefreshSecs = 8, -- tracked-part list rebuild interval
 	},
 }
