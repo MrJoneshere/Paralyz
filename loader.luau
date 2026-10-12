@@ -77,9 +77,9 @@ flystand.start()
 -- momentum) - the fix for "fly stops = slow fall"; see src/hover.luau.
 local hover = fetchModule("hover")({ util = util })
 hover.start()
--- Safe zone: F5 teleports to the emptiest far-away planet platform and
--- back - lets the assistant test drops/dupes while the user is AFK;
--- see src/safezone.luau.
+-- Safe zone: private client-side platform high above (Travel tab toggle,
+-- no keybind) - lets the hub work while the user is AFK; see
+-- src/safezone.luau.
 local safezone = fetchModule("safezone")({ util = util })
 safezone.start()
 -- MoonJuice spawner: direct Tool creation at millisecond spacing + optional
@@ -274,6 +274,13 @@ ui.button(travelTab, {
 			window:Notify({ title = "Travel", content = "No rocks in the world right now", duration = 3 })
 		end
 	end,
+})
+
+ui.section(travelTab, "Safe zone")
+
+ui.toggle(travelTab, "SafeZone", {
+	name = "Safe zone",
+	description = "Private client-side platform 2000 studs up - only you can see or stand on it, no NPC can reach it. For parking AFK while the hub works. Stand here, do NOT drop tools here (drops fall through: the server cannot see the platform).",
 })
 
 ui.section(travelTab, "Chain Machines")
@@ -518,6 +525,15 @@ state.on("Fly", function()
 	travel.sync()
 end)
 state.on("FlySpeed", applyFlySpeed)
+state.on("SafeZone", function(v)
+	if v == true then
+		if not safezone.isOn() then
+			safezone.toggle()
+		end
+	elseif safezone.isOn() then
+		safezone.toggle()
+	end
+end)
 
 state.on("AutoRewards", function()
 	rewards.sync()
@@ -584,6 +600,11 @@ end
 -- restore of ON is honored so a rejoin resumes spawning.
 if state.get("MoonJuiceFarm") == true then
 	applyMoonJuiceFarm(true)
+end
+-- Safe zone: same rule - fresh boot stays put, a restored ON parks the
+-- character on the private platform.
+if state.get("SafeZone") == true and not safezone.isOn() then
+	safezone.toggle()
 end
 -- Instant prompts on by default (they asked for it); the toggle seeds from
 -- saved config when present, so a saved off stays off.
