@@ -28,6 +28,10 @@ return function(deps)
 	local listening = false
 	local autofiring = false
 	local conn: RBXScriptConnection? = nil
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
 
 	local function nearestPrompt(): ProximityPrompt?
 		local plr = Players.LocalPlayer
@@ -98,7 +102,7 @@ return function(deps)
 			return
 		end
 		listening = true
-		do
+		if not owns then
 			-- Reload-safety: live-reload stacks listeners across reloads,
 			-- which multi-fires the key. Oldest generation owns F8 forever.
 			local env: any = getgenv()
@@ -106,6 +110,7 @@ return function(deps)
 				return
 			end
 			env["ParalyzOwn_key_promptkey"] = true
+			owns = true
 		end
 		-- Not gated on gameProcessed (same lesson as minekey F7): GUIs claim
 		-- keys and mark them processed; only a focused text box blocks F8.

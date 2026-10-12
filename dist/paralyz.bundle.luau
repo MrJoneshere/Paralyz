@@ -12,6 +12,84 @@ local BASE = "https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/src/"
 
 -- The bundler replaces this line with a literal table of module sources.
 local PARALYZ_MODULES = {
+	["antiafk"] = [==[
+--!strict
+-- Paralyz / src/antiafk.luau
+-- Keeps an AFK session alive (user order: the hub is meant to run unattended
+-- while farming, but Roblox kicked the client after ~20 idle minutes on
+-- 2026-10-12 and dropped the whole session).
+--
+-- How it works: Players.LocalPlayer.Idled fires right before Roblox's
+-- inactivity kick. Capturing the virtual input controller and acknowledging
+-- with an in-capture right-click cancels the kick - the same mechanism every
+-- anti-idle script uses, and the only client-side one that is not a lie
+-- (the server never sees input from us; the kick is client-side only).
+-- It never touches the camera, never presses a real key, and no game remote
+-- is fired - so it cannot trip the namecall kick or move the character.
+--
+-- Interface: antiafk.start()/stop() plus antiafk.stats() for the menu.
+
+return function(deps)
+	local util = deps.util
+
+	local antiafk = {}
+
+	local Players = game:GetService("Players")
+	local VirtualUser = game:GetService("VirtualUser")
+
+	local conn: RBXScriptConnection? = nil
+	local cancelled = 0
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
+
+	local function onIdle()
+		cancelled += 1
+		local ok = pcall(function()
+			VirtualUser:CaptureController()
+			VirtualUser:ClickButton2(Vector2.new(0, 0))
+		end)
+		if ok and util and util.notify then
+			util.notify("Anti idle", "idle kick cancelled (#" .. cancelled .. ")")
+		end
+	end
+
+	function antiafk.start()
+		if conn then
+			return
+		end
+		if not owns then
+			-- Reload-safety: stacked Idled handlers are harmless but each
+			-- would toast; oldest generation owns it forever.
+			local env: any = getgenv()
+			if env["ParalyzOwn_conn_antiafk"] then
+				return
+			end
+			env["ParalyzOwn_conn_antiafk"] = true
+			owns = true
+		end
+		conn = Players.LocalPlayer.Idled:Connect(onIdle)
+	end
+
+	function antiafk.stop()
+		if conn then
+			conn:Disconnect()
+			conn = nil
+		end
+	end
+
+	function antiafk.isRunning(): boolean
+		return conn ~= nil
+	end
+
+	function antiafk.stats(): string
+		return string.format("%d kicks cancelled", cancelled)
+	end
+
+	return antiafk
+end
+]==],
 	["config"] = [==[
 --!strict
 -- Paralyz / src/config.luau
@@ -1559,12 +1637,17 @@ return function(deps)
 		holding = false
 	end
 
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
+
 	function holdmine.start()
 		if started then
 			return
 		end
 		started = true
-		do
+		if not owns then
 			-- Reload-safety: stacked click listeners multi-swing the
 			-- pickaxe (the character glitch). Oldest generation owns it.
 			local env: any = getgenv()
@@ -1572,6 +1655,7 @@ return function(deps)
 				return
 			end
 			env["ParalyzOwn_key_holdmine"] = true
+			owns = true
 		end
 		beganConn = UIS.InputBegan:Connect(function(input, gameProcessed)
 			if gameProcessed or holding then
@@ -1689,12 +1773,17 @@ return function(deps)
 		end
 	end
 
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
+
 	function hover.start()
 		if listening then
 			return
 		end
 		listening = true
-		do
+		if not owns then
 			-- Reload-safety: live-reload stacks listeners across reloads,
 			-- which multi-fires the key. Oldest generation owns F6 forever.
 			local env: any = getgenv()
@@ -1702,6 +1791,7 @@ return function(deps)
 				return
 			end
 			env["ParalyzOwn_key_hover"] = true
+			owns = true
 		end
 		-- Not gated on gameProcessed (same lesson as F7/F8): only a
 		-- focused text box blocks the key.
@@ -1772,6 +1862,10 @@ return function(deps)
 
 	local PPS = game:GetService("ProximityPromptService")
 	local conn: RBXScriptConnection? = nil
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
 
 	local function fire(prompt: ProximityPrompt)
 		pcall(fireproximityprompt, prompt)
@@ -1787,7 +1881,7 @@ return function(deps)
 			end
 			return
 		end
-		do
+		if not owns then
 			-- Reload-safety: stacked hold-began connections multi-fire
 			-- every prompt. Oldest generation owns it forever.
 			local env: any = getgenv()
@@ -1795,6 +1889,7 @@ return function(deps)
 				return
 			end
 			env["ParalyzOwn_conn_instantprompts"] = true
+			owns = true
 		end
 		conn = PPS.PromptButtonHoldBegan:Connect(fire)
 	end
@@ -2406,6 +2501,10 @@ return function(deps)
 	local runId = 0 -- bumped every toggle; stale loops see a mismatch
 	local anchor: Vector3? = nil
 	local conn: RBXScriptConnection? = nil
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
 	-- Cross-reload generation (see perf.luau): live-reload leaves old
 	-- threads/listeners running. Claim a generation per loop-start; loops
 	-- exit when superseded so swings never stack across reloads.
@@ -2637,7 +2736,7 @@ return function(deps)
 			return
 		end
 		listening = true
-		do
+		if not owns then
 			-- Reload-safety: stacked F7 listeners multi-click the pickaxe
 			-- (the character glitch). Oldest generation owns F7 forever.
 			local env: any = getgenv()
@@ -2645,6 +2744,7 @@ return function(deps)
 				return
 			end
 			env["ParalyzOwn_key_minekey"] = true
+			owns = true
 		end
 		-- Deliberately NOT gated on gameProcessed: GUIs and other hubs (IY)
 		-- claim keys and Roblox flags those presses processed, which silently
@@ -4044,6 +4144,10 @@ return function(deps)
 	local listening = false
 	local autofiring = false
 	local conn: RBXScriptConnection? = nil
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
 
 	local function nearestPrompt(): ProximityPrompt?
 		local plr = Players.LocalPlayer
@@ -4114,7 +4218,7 @@ return function(deps)
 			return
 		end
 		listening = true
-		do
+		if not owns then
 			-- Reload-safety: live-reload stacks listeners across reloads,
 			-- which multi-fires the key. Oldest generation owns F8 forever.
 			local env: any = getgenv()
@@ -4122,6 +4226,7 @@ return function(deps)
 				return
 			end
 			env["ParalyzOwn_key_promptkey"] = true
+			owns = true
 		end
 		-- Not gated on gameProcessed (same lesson as minekey F7): GUIs claim
 		-- keys and mark them processed; only a focused text box blocks F8.
@@ -4444,6 +4549,10 @@ return function(deps)
 	local savedCFrame: CFrame? = nil
 	local platform: BasePart? = nil
 	local charConn: RBXScriptConnection? = nil
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
 
 	local function charParts()
 		local char = Players.LocalPlayer.Character
@@ -4580,7 +4689,7 @@ return function(deps)
 			return
 		end
 		listening = true
-		do
+		if not owns then
 			-- Reload-safety: stacked CharacterAdded handlers all fire on
 			-- death. Oldest generation owns it forever.
 			local env: any = getgenv()
@@ -4588,6 +4697,7 @@ return function(deps)
 				return
 			end
 			env["ParalyzOwn_conn_safezone"] = true
+			owns = true
 		end
 		-- No keybind (user order): the Travel tab toggle owns on/off.
 		charConn = Players.LocalPlayer.CharacterAdded:Connect(function()
@@ -6439,6 +6549,11 @@ safezone.start()
 -- Planet1 swing fallback. GUI toggle only (no keybind); see
 -- src/moonjuice_farm.luau. Never started automatically.
 local moonjuicefarm = fetchModule("moonjuice_farm")({ util = util })
+-- Anti idle: cancels Roblox's ~20 minute inactivity kick so an unattended
+-- farm session survives (that kick ended a session mid-run on 2026-10-12);
+-- client-side only, no keys, no camera motion, no remotes; see
+-- src/antiafk.luau. On by default, Settings toggle.
+local antiafk = fetchModule("antiafk")({ util = util })
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -6699,6 +6814,12 @@ ui.toggle(settingsTab, "InstantPrompts", {
 	value = true,
 })
 
+ui.toggle(settingsTab, "AntiIdle", {
+	name = "Anti idle",
+	description = "Cancels Roblox's ~20 minute inactivity kick while you are AFK. Client-side only: no keys pressed, no camera movement, no remotes fired.",
+	value = true,
+})
+
 ui.section(settingsTab, "Hub")
 
 ui.button(settingsTab, {
@@ -6820,6 +6941,14 @@ local function applyInstantPrompts(v)
 	end
 end
 
+local function applyAntiIdle(v)
+	if v then
+		antiafk.start()
+	else
+		antiafk.stop()
+	end
+end
+
 -- Black screen: a full-viewport veil above everything (Rayfield included).
 -- Frames are transparent to input unless Active, so the menu stays clickable
 -- underneath even while the screen looks dead.
@@ -6854,6 +6983,7 @@ end)
 state.on("SellAt", applySellAt)
 state.on("SwingDelay", applySwingDelay)
 state.on("InstantPrompts", applyInstantPrompts)
+state.on("AntiIdle", applyAntiIdle)
 
 state.on("ESPPlayers", function()
 	esp.sync()
@@ -6965,6 +7095,13 @@ if state.get("InstantPrompts") == nil then
 	state.set("InstantPrompts", true)
 else
 	applyInstantPrompts(state.get("InstantPrompts"))
+end
+-- Anti idle on by default: an unattended farm session must survive the
+-- ~20 minute inactivity kick; a saved off stays off.
+if state.get("AntiIdle") == nil then
+	state.set("AntiIdle", true)
+else
+	applyAntiIdle(state.get("AntiIdle"))
 end
 
 -------------------------------------------------------------- live stats
@@ -7129,6 +7266,7 @@ shutdown = function()
 	hover.stop()
 	safezone.stop()
 	moonjuicefarm.stop()
+	antiafk.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -7169,6 +7307,7 @@ if getgenv then
 		hover = hover,
 		safezone = safezone,
 		moonjuicefarm = moonjuicefarm,
+		antiafk = antiafk,
 		place = place,
 		knowledge = knowledge,
 	}

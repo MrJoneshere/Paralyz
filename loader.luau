@@ -89,6 +89,11 @@ safezone.start()
 -- Planet1 swing fallback. GUI toggle only (no keybind); see
 -- src/moonjuice_farm.luau. Never started automatically.
 local moonjuicefarm = fetchModule("moonjuice_farm")({ util = util })
+-- Anti idle: cancels Roblox's ~20 minute inactivity kick so an unattended
+-- farm session survives (that kick ended a session mid-run on 2026-10-12);
+-- client-side only, no keys, no camera motion, no remotes; see
+-- src/antiafk.luau. On by default, Settings toggle.
+local antiafk = fetchModule("antiafk")({ util = util })
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -349,6 +354,12 @@ ui.toggle(settingsTab, "InstantPrompts", {
 	value = true,
 })
 
+ui.toggle(settingsTab, "AntiIdle", {
+	name = "Anti idle",
+	description = "Cancels Roblox's ~20 minute inactivity kick while you are AFK. Client-side only: no keys pressed, no camera movement, no remotes fired.",
+	value = true,
+})
+
 ui.section(settingsTab, "Hub")
 
 ui.button(settingsTab, {
@@ -470,6 +481,14 @@ local function applyInstantPrompts(v)
 	end
 end
 
+local function applyAntiIdle(v)
+	if v then
+		antiafk.start()
+	else
+		antiafk.stop()
+	end
+end
+
 -- Black screen: a full-viewport veil above everything (Rayfield included).
 -- Frames are transparent to input unless Active, so the menu stays clickable
 -- underneath even while the screen looks dead.
@@ -504,6 +523,7 @@ end)
 state.on("SellAt", applySellAt)
 state.on("SwingDelay", applySwingDelay)
 state.on("InstantPrompts", applyInstantPrompts)
+state.on("AntiIdle", applyAntiIdle)
 
 state.on("ESPPlayers", function()
 	esp.sync()
@@ -615,6 +635,13 @@ if state.get("InstantPrompts") == nil then
 	state.set("InstantPrompts", true)
 else
 	applyInstantPrompts(state.get("InstantPrompts"))
+end
+-- Anti idle on by default: an unattended farm session must survive the
+-- ~20 minute inactivity kick; a saved off stays off.
+if state.get("AntiIdle") == nil then
+	state.set("AntiIdle", true)
+else
+	applyAntiIdle(state.get("AntiIdle"))
 end
 
 -------------------------------------------------------------- live stats
@@ -779,6 +806,7 @@ shutdown = function()
 	hover.stop()
 	safezone.stop()
 	moonjuicefarm.stop()
+	antiafk.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -819,6 +847,7 @@ if getgenv then
 		hover = hover,
 		safezone = safezone,
 		moonjuicefarm = moonjuicefarm,
+		antiafk = antiafk,
 		place = place,
 		knowledge = knowledge,
 	}

@@ -77,12 +77,17 @@ return function(deps)
 		end
 	end
 
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
+
 	function hover.start()
 		if listening then
 			return
 		end
 		listening = true
-		do
+		if not owns then
 			-- Reload-safety: live-reload stacks listeners across reloads,
 			-- which multi-fires the key. Oldest generation owns F6 forever.
 			local env: any = getgenv()
@@ -90,6 +95,7 @@ return function(deps)
 				return
 			end
 			env["ParalyzOwn_key_hover"] = true
+			owns = true
 		end
 		-- Not gated on gameProcessed (same lesson as F7/F8): only a
 		-- focused text box blocks the key.

@@ -47,12 +47,17 @@ return function(deps)
 		holding = false
 	end
 
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
+
 	function holdmine.start()
 		if started then
 			return
 		end
 		started = true
-		do
+		if not owns then
 			-- Reload-safety: stacked click listeners multi-swing the
 			-- pickaxe (the character glitch). Oldest generation owns it.
 			local env: any = getgenv()
@@ -60,6 +65,7 @@ return function(deps)
 				return
 			end
 			env["ParalyzOwn_key_holdmine"] = true
+			owns = true
 		end
 		beganConn = UIS.InputBegan:Connect(function(input, gameProcessed)
 			if gameProcessed or holding then

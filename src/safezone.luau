@@ -38,6 +38,10 @@ return function(deps)
 	local savedCFrame: CFrame? = nil
 	local platform: BasePart? = nil
 	local charConn: RBXScriptConnection? = nil
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
 
 	local function charParts()
 		local char = Players.LocalPlayer.Character
@@ -174,7 +178,7 @@ return function(deps)
 			return
 		end
 		listening = true
-		do
+		if not owns then
 			-- Reload-safety: stacked CharacterAdded handlers all fire on
 			-- death. Oldest generation owns it forever.
 			local env: any = getgenv()
@@ -182,6 +186,7 @@ return function(deps)
 				return
 			end
 			env["ParalyzOwn_conn_safezone"] = true
+			owns = true
 		end
 		-- No keybind (user order): the Travel tab toggle owns on/off.
 		charConn = Players.LocalPlayer.CharacterAdded:Connect(function()

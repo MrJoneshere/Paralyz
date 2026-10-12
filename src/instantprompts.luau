@@ -22,6 +22,10 @@ return function(deps)
 
 	local PPS = game:GetService("ProximityPromptService")
 	local conn: RBXScriptConnection? = nil
+	-- Ownership claim for the single-owner listener pattern: the env token
+	-- stops OTHER generations from stacking, this flag keeps stop() ->
+	-- start() working inside the owning generation.
+	local owns = false
 
 	local function fire(prompt: ProximityPrompt)
 		pcall(fireproximityprompt, prompt)
@@ -37,7 +41,7 @@ return function(deps)
 			end
 			return
 		end
-		do
+		if not owns then
 			-- Reload-safety: stacked hold-began connections multi-fire
 			-- every prompt. Oldest generation owns it forever.
 			local env: any = getgenv()
@@ -45,6 +49,7 @@ return function(deps)
 				return
 			end
 			env["ParalyzOwn_conn_instantprompts"] = true
+			owns = true
 		end
 		conn = PPS.PromptButtonHoldBegan:Connect(fire)
 	end
