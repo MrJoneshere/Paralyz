@@ -133,15 +133,19 @@ return {
 	},
 
 	perf = {
-		-- Frustum culling ("Lower Usage" toggle): BaseParts the camera
-		-- cannot see are skipped by the renderer via
-		-- LocalTransparencyModifier. Nothing visible ever changes - no
-		-- quality, shadow, lighting or frame-cap touches, by user order.
+		-- Frustum culling ("Lower Usage" toggle): BaseParts whose whole
+		-- oriented box lies outside the camera frustum are skipped via
+		-- LocalTransparencyModifier, with an exact 8-corner proof (never a
+		-- center heuristic), and their point lights / particle emitters /
+		-- surface GUIs are parked only when each one is provably invisible
+		-- too. Nothing visible ever changes - no quality, shadow, lighting
+		-- or frame-cap touches, by user order.
 		cullNearDist = 150, -- inside this: always rendered (no pop-in)
-		cullMaxSize = 120, -- bigger than this: never touched (planets)
+		cullMaxSize = 200, -- bigger than this: never touched (planets)
 		cullMarginDeg = 10, -- frustum border absorbing fast camera moves
-		cullBudget = 250, -- parts tested per slice (optimizer stays cheap)
-		cullSliceSecs = 0.12, -- seconds between slices (fast re-show on turns)
+		cullBudget = 400, -- parts tested per slice (optimizer stays cheap)
+		cullSliceSecs = 0.1, -- seconds between slices (fast re-show on turns)
 		cullRefreshSecs = 8, -- tracked-part list rebuild interval
+		cullParticleSafety = 25, -- extra studs on top of the particle reach proof
 	},
 }
