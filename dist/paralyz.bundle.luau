@@ -1516,6 +1516,15 @@ return function(deps)
 			return
 		end
 		started = true
+		do
+			-- Reload-safety: stacked click listeners multi-swing the
+			-- pickaxe (the character glitch). Oldest generation owns it.
+			local env: any = getgenv()
+			if env["ParalyzOwn_key_holdmine"] then
+				return
+			end
+			env["ParalyzOwn_key_holdmine"] = true
+		end
 		beganConn = UIS.InputBegan:Connect(function(input, gameProcessed)
 			if gameProcessed or holding then
 				return
@@ -1637,6 +1646,15 @@ return function(deps)
 			return
 		end
 		listening = true
+		do
+			-- Reload-safety: live-reload stacks listeners across reloads,
+			-- which multi-fires the key. Oldest generation owns F6 forever.
+			local env: any = getgenv()
+			if env["ParalyzOwn_key_hover"] then
+				return
+			end
+			env["ParalyzOwn_key_hover"] = true
+		end
 		-- Not gated on gameProcessed (same lesson as F7/F8): only a
 		-- focused text box blocks the key.
 		conn = UIS.InputBegan:Connect(function(input)
@@ -2331,6 +2349,20 @@ return function(deps)
 	local runId = 0 -- bumped every toggle; stale loops see a mismatch
 	local anchor: Vector3? = nil
 	local conn: RBXScriptConnection? = nil
+	-- Cross-reload generation (see perf.luau): live-reload leaves old
+	-- threads/listeners running. Claim a generation per loop-start; loops
+	-- exit when superseded so swings never stack across reloads.
+	local GEN_KEY = "ParalyzGen_minekey"
+	local function claimGen(): number
+		local env: any = getgenv()
+		local g = (env[GEN_KEY] or 0) + 1
+		env[GEN_KEY] = g
+		return g
+	end
+	local function genAlive(g: number): boolean
+		local env: any = getgenv()
+		return env[GEN_KEY] == g
+	end
 
 	local function isPickaxe(tool: Tool): boolean
 		return string.find(string.lower(tool.Name), "pickaxe", 1, true) ~= nil
@@ -2373,7 +2405,11 @@ return function(deps)
 	-- Stall recovery (the user's fix): flick the tool off/on to reset the
 	-- server's swing echo state, then step to a fresh spot so swings land
 	-- on a new face of the rock - all inside the 7.5-stud circle.
-	local function recover()
+	local function recover(cross: number?)
+		if cross ~= nil and not genAlive(cross) then
+			recovering = false
+			return
+		end
 		if recovering or not swinging then
 			return
 		end
@@ -2429,7 +2465,7 @@ return function(deps)
 		recovering = false
 	end
 
-	local function swingLoop(myGen: number)
+	local function swingLoop(myGen: number, cross: number)
 		local lastJuice = nil
 		local lastWatch = 0
 		local lastBoundary = 0
@@ -2441,7 +2477,7 @@ return function(deps)
 				lastJuice = j
 			end
 		end
-		while swinging and runId == myGen do
+		while swinging and runId == myGen and genAlive(cross) do
 			local ok, err = pcall(function()
 				local hrp, hum = charParts()
 				local now = os.clock()
@@ -2463,7 +2499,7 @@ return function(deps)
 				-- Watchdog + boundary keep running WHILE the swing plays
 				-- (sliced), so a stall is still caught on time.
 				local t0 = os.clock()
-				while swinging and runId == myGen and os.clock() - t0 < waitSecs do
+				while swinging and runId == myGen and genAlive(cross) and os.clock() - t0 < waitSecs do
 					local nowSlice = os.clock()
 
 					-- Juice watchdog: no progress for STALL_SECS -> recover.
@@ -2479,7 +2515,9 @@ return function(deps)
 							end
 							if nowSlice - lastProgress >= STALL_SECS then
 								lastProgress = nowSlice -- one recovery per window
-								task.spawn(recover)
+								task.spawn(function()
+									recover(cross)
+								end)
 							end
 						end
 					end
@@ -2523,11 +2561,13 @@ return function(deps)
 				end
 			end
 			local myGen = runId
+			local cross = claimGen()
 			task.spawn(function()
-				swingLoop(myGen)
+				swingLoop(myGen, cross)
 			end)
 		else
 			anchor = nil
+			claimGen() -- invalidate any stray loop from any generation
 			stopWalk()
 		end
 		if util and util.notify then
@@ -2540,6 +2580,15 @@ return function(deps)
 			return
 		end
 		listening = true
+		do
+			-- Reload-safety: stacked F7 listeners multi-click the pickaxe
+			-- (the character glitch). Oldest generation owns F7 forever.
+			local env: any = getgenv()
+			if env["ParalyzOwn_key_minekey"] then
+				return
+			end
+			env["ParalyzOwn_key_minekey"] = true
+		end
 		-- Deliberately NOT gated on gameProcessed: GUIs and other hubs (IY)
 		-- claim keys and Roblox flags those presses processed, which silently
 		-- ate F7. Only a focused text box (typing) blocks the toggle now.
@@ -2556,6 +2605,7 @@ return function(deps)
 
 	function minekey.stop()
 		runId = runId + 1
+		claimGen() -- invalidate any loop, including older generations
 		swinging = false
 		recovering = false
 		listening = false
@@ -3204,6 +3254,24 @@ return function(deps)
 	local hidden: { [BasePart]: boolean } = {}
 	local hiddenCount = 0
 	local trackedCount = 0
+	-- Parked point-lights (see setShown): declared up here so every
+	-- function below, including buildRegistry, captures the local.
+	local litOut: { [PointLight]: boolean } = {}
+	local litCount = 0
+	-- Cross-reload generation: live-reload leaves old threads running, so
+	-- every reload claims a new generation and old loops exit on their next
+	-- slice instead of stacking forever.
+	local GEN_KEY = "ParalyzGen_perf"
+	local function claimGen(): number
+		local env: any = getgenv()
+		local g = (env[GEN_KEY] or 0) + 1
+		env[GEN_KEY] = g
+		return g
+	end
+	local function genAlive(g: number): boolean
+		local env: any = getgenv()
+		return env[GEN_KEY] == g
+	end
 
 	local function opts()
 		local p = config.perf or {}
@@ -3289,6 +3357,16 @@ return function(deps)
 		if cursor > #fresh then
 			cursor = 1
 		end
+		-- Drop parked-light records whose light is gone (count stays honest).
+		for light, _ in pairs(litOut) do
+			local okAlive = pcall(function()
+				return light.Parent ~= nil
+			end)
+			if not okAlive then
+				litOut[light] = nil
+				litCount -= 1
+			end
+		end
 		lastRegistryBuild = os.clock()
 	end
 
@@ -3322,24 +3400,69 @@ return function(deps)
 		return math.abs(rel.X / depth) > math.tan(halfH) or math.abs(rel.Y / depth) > math.tan(halfV)
 	end
 
-	local function setShown(part: BasePart, show: boolean)
-		local ok = pcall(function()
-			part.LocalTransparencyModifier = show and 0 or 1
-		end)
-		if not ok then
-			return
-		end
+	-- Lights on a hidden part: a PointLight only reaches light.Range
+	-- studs, so when the part sits farther off-screen than that (inside
+	-- our frustum margin), disabling it cannot change one visible pixel.
+	-- Range 0 = infinite: never touched. Spot/SurfaceLight are
+	-- directional and can spill on-screen from off-screen: never touched.
+	-- Transitions only (newly hidden / newly shown), never per-slice.
+	local function setShown(part: BasePart, show: boolean, camPos: Vector3, tanMargin: number)
 		if show then
 			if hidden[part] then
 				hidden[part] = nil
 				hiddenCount -= 1
+				-- Newly visible: restore any lights we parked for it.
+				for _, d in ipairs(part:GetDescendants()) do
+					if d:IsA("PointLight") and litOut[d :: PointLight] then
+						pcall(function()
+							(d :: PointLight).Enabled = true
+						end)
+						litOut[d :: PointLight] = nil
+						litCount -= 1
+					end
+				end
 			end
-		else
-			if not hidden[part] then
-				hidden[part] = true
-				hiddenCount += 1
+			pcall(function()
+				part.LocalTransparencyModifier = 0
+			end)
+			return
+		end
+		local ok = pcall(function()
+			part.LocalTransparencyModifier = 1
+		end)
+		if not ok then
+			return
+		end
+		if hidden[part] then
+			return -- already hidden: lights already parked
+		end
+		hidden[part] = true
+		hiddenCount += 1
+		local cover = tanMargin * (part.Position - camPos).Magnitude
+		for _, d in ipairs(part:GetDescendants()) do
+			if d:IsA("PointLight") then
+				local light = d :: PointLight
+				if light.Range > 0 and light.Range <= cover and not litOut[light] then
+					local okOff = pcall(function()
+						light.Enabled = false
+					end)
+					if okOff then
+						litOut[light] = true
+						litCount += 1
+					end
+				end
 			end
 		end
+	end
+
+	local function restoreLights()
+		for light, _ in pairs(litOut) do
+			pcall(function()
+				light.Enabled = true
+			end)
+		end
+		table.clear(litOut)
+		litCount = 0
 	end
 
 	local function restoreAll()
@@ -3350,10 +3473,11 @@ return function(deps)
 		end
 		table.clear(hidden)
 		hiddenCount = 0
+		restoreLights()
 	end
 
-	local function scanSlice(myGen: number)
-		if not enabled or runId ~= myGen then
+	local function scanSlice(myGen: number, cross: number)
+		if not enabled or runId ~= myGen or not genAlive(cross) then
 			return
 		end
 		local o = opts()
@@ -3367,6 +3491,8 @@ return function(deps)
 		if not cam then
 			return
 		end
+		local camPos = cam.CFrame.Position
+		local tanMargin = math.tan(math.rad(o.marginDeg))
 		local char = Players.LocalPlayer.Character
 		local n = #registry
 		local done = 0
@@ -3385,7 +3511,7 @@ return function(deps)
 					if char and part:IsDescendantOf(char) then
 						return -- equipped since the registry build
 					end
-					setShown(part, not isOutside(part, cam, o))
+					setShown(part, not isOutside(part, cam, o), camPos, tanMargin)
 				end)
 				if not ok then
 					-- A single bad part must not kill the slice.
@@ -3394,10 +3520,10 @@ return function(deps)
 		end
 	end
 
-	local function loop(myGen: number)
-		while enabled and runId == myGen do
+	local function loop(myGen: number, cross: number)
+		while enabled and runId == myGen and genAlive(cross) do
 			local o = opts()
-			local ok, err = pcall(scanSlice, myGen)
+			local ok, err = pcall(scanSlice, myGen, cross)
 			if not ok then
 				warn("[Paralyz] perf cull slice error: " .. tostring(err))
 			end
@@ -3414,9 +3540,10 @@ return function(deps)
 			enabled = true
 			runId += 1
 			local myGen = runId
+			local cross = claimGen()
 			lastRegistryBuild = 0
 			task.spawn(function()
-				loop(myGen)
+				loop(myGen, cross)
 			end)
 			return "frustum culling on - off-screen parts skip rendering, nothing visible changes"
 		end
@@ -3425,6 +3552,7 @@ return function(deps)
 		end
 		enabled = false
 		runId += 1
+		claimGen() -- invalidate any loop, including older generations
 		restoreAll()
 		registry = {}
 		trackedCount = 0
@@ -3435,6 +3563,7 @@ return function(deps)
 	function perf.stop()
 		enabled = false
 		runId += 1
+		claimGen() -- invalidate any loop, including older generations
 		restoreAll()
 		registry = {}
 		trackedCount = 0
@@ -3442,9 +3571,10 @@ return function(deps)
 
 	function perf.report(): string
 		return string.format(
-			"culling=%s hidden=%d tracked=%d quality=%s shadows=%s",
+			"culling=%s hidden=%d lights=%d tracked=%d quality=%s shadows=%s",
 			enabled and "on" or "off",
 			hiddenCount,
+			litCount,
 			trackedCount,
 			tostring(settings().Rendering.QualityLevel),
 			tostring(Lighting.GlobalShadows)
@@ -3452,6 +3582,108 @@ return function(deps)
 	end
 
 	return perf
+end
+]==],
+	["place"] = [==[
+--!strict
+-- Paralyz / src/place.luau
+-- Subplace / main-place detection + per-place variation data (user order:
+-- "detect which subplace user is in or if they are in main place so that
+-- script can be variated across subplaces and mainplace").
+--
+-- The hub NEVER moves the user across places (that would rip them out of
+-- their server) - this module only describes where they are so every other
+-- module can vary behavior: planet lists, machine availability, labels.
+-- All queries are live (workspace + game.PlaceId), so a rejoin anywhere
+-- is picked up with no restart.
+
+return function(_deps)
+	local place = {}
+
+	local workspace = game:GetService("Workspace")
+
+	-- Known places (universe u8751492147). Unknown placeIds get live data
+	-- with static fields nil - callers must handle that (hasPlanet covers
+	-- it: live workspace check, never the static list).
+	local INFO: { [number]: { name: string, planets: { string }, converter: boolean, ionizer: boolean } } = {
+		[133579701570149] = {
+			name = "main",
+			planets = { "Planet1", "Planet2", "Planet3", "Planet4", "Planet5", "Planet6" },
+			converter = true,
+			ionizer = true,
+		},
+		[77683185698128] = {
+			name = "Pluto/Kuiper subplace",
+			planets = { "Planet6", "Planet11", "Planet12", "Planet13", "Planet14", "Planet15" },
+			converter = true, -- City.ConverterMachine, insert-only prompt
+			ionizer = false,
+		},
+	}
+
+	function place.id(): number
+		return game.PlaceId
+	end
+
+	function place.isMain(): boolean
+		return game.PlaceId == 133579701570149
+	end
+
+	function place.info()
+		return INFO[game.PlaceId]
+	end
+
+	function place.name(): string
+		local info = INFO[game.PlaceId]
+		if info then
+			return info.name
+		end
+		return "place-" .. tostring(game.PlaceId)
+	end
+
+	-- Live check: does this planet exist in THIS server right now.
+	function place.hasPlanet(name: string): boolean
+		local planets = workspace:FindFirstChild("Planets")
+		return planets ~= nil and planets:FindFirstChild(name) ~= nil
+	end
+
+	-- Live list of planet folder names present right now.
+	function place.livePlanets(): { string }
+		local out: { string } = {}
+		local planets = workspace:FindFirstChild("Planets")
+		if planets then
+			for _, p in ipairs(planets:GetChildren()) do
+				table.insert(out, p.Name)
+			end
+			table.sort(out)
+		end
+		return out
+	end
+
+	-- Static-list planets that also exist live (safe teleport/farm targets).
+	function place.knownLivePlanets(): { string }
+		local info = INFO[game.PlaceId]
+		if not info then
+			return place.livePlanets()
+		end
+		local out: { string } = {}
+		for _, name in ipairs(info.planets) do
+			if place.hasPlanet(name) then
+				table.insert(out, name)
+			end
+		end
+		return out
+	end
+
+	function place.hasConverter(): boolean
+		local info = INFO[game.PlaceId]
+		if info ~= nil then
+			return info.converter
+		end
+		return workspace:FindFirstChild("City") ~= nil
+			and workspace.City:FindFirstChild("ConverterMachine") ~= nil
+	end
+
+	return place
 end
 ]==],
 	["promptkey"] = [==[
@@ -3555,6 +3787,15 @@ return function(deps)
 			return
 		end
 		listening = true
+		do
+			-- Reload-safety: live-reload stacks listeners across reloads,
+			-- which multi-fires the key. Oldest generation owns F8 forever.
+			local env: any = getgenv()
+			if env["ParalyzOwn_key_promptkey"] then
+				return
+			end
+			env["ParalyzOwn_key_promptkey"] = true
+		end
 		-- Not gated on gameProcessed (same lesson as minekey F7): GUIs claim
 		-- keys and mark them processed; only a focused text box blocks F8.
 		conn = UIS.InputBegan:Connect(function(input)
@@ -5821,6 +6062,9 @@ local instantprompts = fetchModule("instantprompts")({ util = util })
 local minekey = fetchModule("minekey")({ util = util })
 local promptkey = fetchModule("promptkey")({ util = util })
 local knowledge = fetchModule("knowledge") -- data table, not a factory
+-- Subplace / main-place detection + per-place data; every module can vary
+-- behavior by place through it. Never moves the user across places.
+local place = fetchModule("place")({})
 -- Screen shake off at boot, before the window even exists ("waits no
 -- time"): replays the settings row's disable action until the game's
 -- "Anti Screen Shake" object exists; falls back to a local copy. Quiet -
@@ -6574,6 +6818,7 @@ if getgenv then
 		hover = hover,
 		safezone = safezone,
 		moonjuicefarm = moonjuicefarm,
+		place = place,
 		knowledge = knowledge,
 	}
 end

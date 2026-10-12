@@ -82,6 +82,15 @@ return function(deps)
 			return
 		end
 		listening = true
+		do
+			-- Reload-safety: live-reload stacks listeners across reloads,
+			-- which multi-fires the key. Oldest generation owns F6 forever.
+			local env: any = getgenv()
+			if env["ParalyzOwn_key_hover"] then
+				return
+			end
+			env["ParalyzOwn_key_hover"] = true
+		end
 		-- Not gated on gameProcessed (same lesson as F7/F8): only a
 		-- focused text box blocks the key.
 		conn = UIS.InputBegan:Connect(function(input)

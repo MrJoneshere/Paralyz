@@ -40,6 +40,24 @@ return function(deps)
 	local hidden: { [BasePart]: boolean } = {}
 	local hiddenCount = 0
 	local trackedCount = 0
+	-- Parked point-lights (see setShown): declared up here so every
+	-- function below, including buildRegistry, captures the local.
+	local litOut: { [PointLight]: boolean } = {}
+	local litCount = 0
+	-- Cross-reload generation: live-reload leaves old threads running, so
+	-- every reload claims a new generation and old loops exit on their next
+	-- slice instead of stacking forever.
+	local GEN_KEY = "ParalyzGen_perf"
+	local function claimGen(): number
+		local env: any = getgenv()
+		local g = (env[GEN_KEY] or 0) + 1
+		env[GEN_KEY] = g
+		return g
+	end
+	local function genAlive(g: number): boolean
+		local env: any = getgenv()
+		return env[GEN_KEY] == g
+	end
 
 	local function opts()
 		local p = config.perf or {}
@@ -125,6 +143,16 @@ return function(deps)
 		if cursor > #fresh then
 			cursor = 1
 		end
+		-- Drop parked-light records whose light is gone (count stays honest).
+		for light, _ in pairs(litOut) do
+			local okAlive = pcall(function()
+				return light.Parent ~= nil
+			end)
+			if not okAlive then
+				litOut[light] = nil
+				litCount -= 1
+			end
+		end
 		lastRegistryBuild = os.clock()
 	end
 
@@ -158,24 +186,69 @@ return function(deps)
 		return math.abs(rel.X / depth) > math.tan(halfH) or math.abs(rel.Y / depth) > math.tan(halfV)
 	end
 
-	local function setShown(part: BasePart, show: boolean)
-		local ok = pcall(function()
-			part.LocalTransparencyModifier = show and 0 or 1
-		end)
-		if not ok then
-			return
-		end
+	-- Lights on a hidden part: a PointLight only reaches light.Range
+	-- studs, so when the part sits farther off-screen than that (inside
+	-- our frustum margin), disabling it cannot change one visible pixel.
+	-- Range 0 = infinite: never touched. Spot/SurfaceLight are
+	-- directional and can spill on-screen from off-screen: never touched.
+	-- Transitions only (newly hidden / newly shown), never per-slice.
+	local function setShown(part: BasePart, show: boolean, camPos: Vector3, tanMargin: number)
 		if show then
 			if hidden[part] then
 				hidden[part] = nil
 				hiddenCount -= 1
+				-- Newly visible: restore any lights we parked for it.
+				for _, d in ipairs(part:GetDescendants()) do
+					if d:IsA("PointLight") and litOut[d :: PointLight] then
+						pcall(function()
+							(d :: PointLight).Enabled = true
+						end)
+						litOut[d :: PointLight] = nil
+						litCount -= 1
+					end
+				end
 			end
-		else
-			if not hidden[part] then
-				hidden[part] = true
-				hiddenCount += 1
+			pcall(function()
+				part.LocalTransparencyModifier = 0
+			end)
+			return
+		end
+		local ok = pcall(function()
+			part.LocalTransparencyModifier = 1
+		end)
+		if not ok then
+			return
+		end
+		if hidden[part] then
+			return -- already hidden: lights already parked
+		end
+		hidden[part] = true
+		hiddenCount += 1
+		local cover = tanMargin * (part.Position - camPos).Magnitude
+		for _, d in ipairs(part:GetDescendants()) do
+			if d:IsA("PointLight") then
+				local light = d :: PointLight
+				if light.Range > 0 and light.Range <= cover and not litOut[light] then
+					local okOff = pcall(function()
+						light.Enabled = false
+					end)
+					if okOff then
+						litOut[light] = true
+						litCount += 1
+					end
+				end
 			end
 		end
+	end
+
+	local function restoreLights()
+		for light, _ in pairs(litOut) do
+			pcall(function()
+				light.Enabled = true
+			end)
+		end
+		table.clear(litOut)
+		litCount = 0
 	end
 
 	local function restoreAll()
@@ -186,10 +259,11 @@ return function(deps)
 		end
 		table.clear(hidden)
 		hiddenCount = 0
+		restoreLights()
 	end
 
-	local function scanSlice(myGen: number)
-		if not enabled or runId ~= myGen then
+	local function scanSlice(myGen: number, cross: number)
+		if not enabled or runId ~= myGen or not genAlive(cross) then
 			return
 		end
 		local o = opts()
@@ -203,6 +277,8 @@ return function(deps)
 		if not cam then
 			return
 		end
+		local camPos = cam.CFrame.Position
+		local tanMargin = math.tan(math.rad(o.marginDeg))
 		local char = Players.LocalPlayer.Character
 		local n = #registry
 		local done = 0
@@ -221,7 +297,7 @@ return function(deps)
 					if char and part:IsDescendantOf(char) then
 						return -- equipped since the registry build
 					end
-					setShown(part, not isOutside(part, cam, o))
+					setShown(part, not isOutside(part, cam, o), camPos, tanMargin)
 				end)
 				if not ok then
 					-- A single bad part must not kill the slice.
@@ -230,10 +306,10 @@ return function(deps)
 		end
 	end
 
-	local function loop(myGen: number)
-		while enabled and runId == myGen do
+	local function loop(myGen: number, cross: number)
+		while enabled and runId == myGen and genAlive(cross) do
 			local o = opts()
-			local ok, err = pcall(scanSlice, myGen)
+			local ok, err = pcall(scanSlice, myGen, cross)
 			if not ok then
 				warn("[Paralyz] perf cull slice error: " .. tostring(err))
 			end
@@ -250,9 +326,10 @@ return function(deps)
 			enabled = true
 			runId += 1
 			local myGen = runId
+			local cross = claimGen()
 			lastRegistryBuild = 0
 			task.spawn(function()
-				loop(myGen)
+				loop(myGen, cross)
 			end)
 			return "frustum culling on - off-screen parts skip rendering, nothing visible changes"
 		end
@@ -261,6 +338,7 @@ return function(deps)
 		end
 		enabled = false
 		runId += 1
+		claimGen() -- invalidate any loop, including older generations
 		restoreAll()
 		registry = {}
 		trackedCount = 0
@@ -271,6 +349,7 @@ return function(deps)
 	function perf.stop()
 		enabled = false
 		runId += 1
+		claimGen() -- invalidate any loop, including older generations
 		restoreAll()
 		registry = {}
 		trackedCount = 0
@@ -278,9 +357,10 @@ return function(deps)
 
 	function perf.report(): string
 		return string.format(
-			"culling=%s hidden=%d tracked=%d quality=%s shadows=%s",
+			"culling=%s hidden=%d lights=%d tracked=%d quality=%s shadows=%s",
 			enabled and "on" or "off",
 			hiddenCount,
+			litCount,
 			trackedCount,
 			tostring(settings().Rendering.QualityLevel),
 			tostring(Lighting.GlobalShadows)

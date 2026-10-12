@@ -63,6 +63,9 @@ local instantprompts = fetchModule("instantprompts")({ util = util })
 local minekey = fetchModule("minekey")({ util = util })
 local promptkey = fetchModule("promptkey")({ util = util })
 local knowledge = fetchModule("knowledge") -- data table, not a factory
+-- Subplace / main-place detection + per-place data; every module can vary
+-- behavior by place through it. Never moves the user across places.
+local place = fetchModule("place")({})
 -- Screen shake off at boot, before the window even exists ("waits no
 -- time"): replays the settings row's disable action until the game's
 -- "Anti Screen Shake" object exists; falls back to a local copy. Quiet -
@@ -816,6 +819,7 @@ if getgenv then
 		hover = hover,
 		safezone = safezone,
 		moonjuicefarm = moonjuicefarm,
+		place = place,
 		knowledge = knowledge,
 	}
 end

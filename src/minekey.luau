@@ -66,6 +66,20 @@ return function(deps)
 	local runId = 0 -- bumped every toggle; stale loops see a mismatch
 	local anchor: Vector3? = nil
 	local conn: RBXScriptConnection? = nil
+	-- Cross-reload generation (see perf.luau): live-reload leaves old
+	-- threads/listeners running. Claim a generation per loop-start; loops
+	-- exit when superseded so swings never stack across reloads.
+	local GEN_KEY = "ParalyzGen_minekey"
+	local function claimGen(): number
+		local env: any = getgenv()
+		local g = (env[GEN_KEY] or 0) + 1
+		env[GEN_KEY] = g
+		return g
+	end
+	local function genAlive(g: number): boolean
+		local env: any = getgenv()
+		return env[GEN_KEY] == g
+	end
 
 	local function isPickaxe(tool: Tool): boolean
 		return string.find(string.lower(tool.Name), "pickaxe", 1, true) ~= nil
@@ -108,7 +122,11 @@ return function(deps)
 	-- Stall recovery (the user's fix): flick the tool off/on to reset the
 	-- server's swing echo state, then step to a fresh spot so swings land
 	-- on a new face of the rock - all inside the 7.5-stud circle.
-	local function recover()
+	local function recover(cross: number?)
+		if cross ~= nil and not genAlive(cross) then
+			recovering = false
+			return
+		end
 		if recovering or not swinging then
 			return
 		end
@@ -164,7 +182,7 @@ return function(deps)
 		recovering = false
 	end
 
-	local function swingLoop(myGen: number)
+	local function swingLoop(myGen: number, cross: number)
 		local lastJuice = nil
 		local lastWatch = 0
 		local lastBoundary = 0
@@ -176,7 +194,7 @@ return function(deps)
 				lastJuice = j
 			end
 		end
-		while swinging and runId == myGen do
+		while swinging and runId == myGen and genAlive(cross) do
 			local ok, err = pcall(function()
 				local hrp, hum = charParts()
 				local now = os.clock()
@@ -198,7 +216,7 @@ return function(deps)
 				-- Watchdog + boundary keep running WHILE the swing plays
 				-- (sliced), so a stall is still caught on time.
 				local t0 = os.clock()
-				while swinging and runId == myGen and os.clock() - t0 < waitSecs do
+				while swinging and runId == myGen and genAlive(cross) and os.clock() - t0 < waitSecs do
 					local nowSlice = os.clock()
 
 					-- Juice watchdog: no progress for STALL_SECS -> recover.
@@ -214,7 +232,9 @@ return function(deps)
 							end
 							if nowSlice - lastProgress >= STALL_SECS then
 								lastProgress = nowSlice -- one recovery per window
-								task.spawn(recover)
+								task.spawn(function()
+									recover(cross)
+								end)
 							end
 						end
 					end
@@ -258,11 +278,13 @@ return function(deps)
 				end
 			end
 			local myGen = runId
+			local cross = claimGen()
 			task.spawn(function()
-				swingLoop(myGen)
+				swingLoop(myGen, cross)
 			end)
 		else
 			anchor = nil
+			claimGen() -- invalidate any stray loop from any generation
 			stopWalk()
 		end
 		if util and util.notify then
@@ -275,6 +297,15 @@ return function(deps)
 			return
 		end
 		listening = true
+		do
+			-- Reload-safety: stacked F7 listeners multi-click the pickaxe
+			-- (the character glitch). Oldest generation owns F7 forever.
+			local env: any = getgenv()
+			if env["ParalyzOwn_key_minekey"] then
+				return
+			end
+			env["ParalyzOwn_key_minekey"] = true
+		end
 		-- Deliberately NOT gated on gameProcessed: GUIs and other hubs (IY)
 		-- claim keys and Roblox flags those presses processed, which silently
 		-- ate F7. Only a focused text box (typing) blocks the toggle now.
@@ -291,6 +322,7 @@ return function(deps)
 
 	function minekey.stop()
 		runId = runId + 1
+		claimGen() -- invalidate any loop, including older generations
 		swinging = false
 		recovering = false
 		listening = false

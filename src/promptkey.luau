@@ -98,6 +98,15 @@ return function(deps)
 			return
 		end
 		listening = true
+		do
+			-- Reload-safety: live-reload stacks listeners across reloads,
+			-- which multi-fires the key. Oldest generation owns F8 forever.
+			local env: any = getgenv()
+			if env["ParalyzOwn_key_promptkey"] then
+				return
+			end
+			env["ParalyzOwn_key_promptkey"] = true
+		end
 		-- Not gated on gameProcessed (same lesson as minekey F7): GUIs claim
 		-- keys and mark them processed; only a focused text box blocks F8.
 		conn = UIS.InputBegan:Connect(function(input)

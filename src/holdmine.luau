@@ -52,6 +52,15 @@ return function(deps)
 			return
 		end
 		started = true
+		do
+			-- Reload-safety: stacked click listeners multi-swing the
+			-- pickaxe (the character glitch). Oldest generation owns it.
+			local env: any = getgenv()
+			if env["ParalyzOwn_key_holdmine"] then
+				return
+			end
+			env["ParalyzOwn_key_holdmine"] = true
+		end
 		beganConn = UIS.InputBegan:Connect(function(input, gameProcessed)
 			if gameProcessed or holding then
 				return
