@@ -2245,9 +2245,17 @@ return knowledge
 -- pickaxe swings while a pickaxe is equipped - "hold-to-mine without
 -- holding", made for going AFK on top of a mining spot.
 --
--- Zero delay (user: "absolute no delay mining"): the loop resumes every
--- resumption point (~1 frame); any server-side debounce dedupes the extra
--- calls on its own.
+-- Click cadence = one click per COMPLETED swing (user report 2026-10-12:
+-- "it happens if you click too much when mining... usually youd need to
+-- click very little, if possible click after the mining is done, thats
+-- why i requested you to make it 0 delay"): the previous build called
+-- Activate() every frame (~60 clicks/s) - exactly the "clicking too
+-- much" that glitches the character (only a very long wait or a rejoin
+-- clears it). The pickaxe's swing is server-side, gated by a ~0.758s
+-- animation (the Mining sound length), so the loop now clicks ONCE,
+-- waits for the swing animation to end (fallback = that sound length),
+-- waits out the server's Enabled lock, then clicks again immediately -
+-- zero delay BETWEEN swings, which was the real request.
 --
 -- Stall watchdog + recovery (user: "mining stops for no reason... unequip
 -- and re equip the pickaxe and move 5 studs... the character never gets
@@ -2302,6 +2310,22 @@ return function(deps)
 
 	local function isPickaxe(tool: Tool): boolean
 		return string.find(string.lower(tool.Name), "pickaxe", 1, true) ~= nil
+	end
+
+	-- One click per completed swing: length of a single swing. The swing
+	-- itself is server-side; the Mining sound (0.758s on the Diamond
+	-- Pickaxe) tracks the animation, + 0.1s margin for the server's
+	-- Enabled-lock release. Fallback 0.85 if the tool has no such sound.
+	local function swingSecs(tool: Tool): number
+		local secs = nil
+		pcall(function()
+			local h = tool:FindFirstChild("Handle")
+			local s = h and h:FindFirstChild("Mining")
+			if s and s:IsA("Sound") and s.TimeLength > 0.05 then
+				secs = s.TimeLength + 0.1
+			end
+		end)
+		return secs or 0.85
 	end
 
 	-- Root part + humanoid of the CURRENT character (nil-safe).
@@ -2400,42 +2424,56 @@ return function(deps)
 
 				-- F7 on without a pickaxe, equipped later: anchor there.
 				local tool = util.equippedTool()
+				local waitSecs = 0.1 -- no pickaxe: idle poll
 				if tool and isPickaxe(tool) then
 					if not anchor and hrp then
 						anchor = hrp.Position
 					end
+					-- ONE click per completed swing (see header): the
+					-- server plays a ~0.76s swing and locks the tool;
+					-- re-clicking mid-swing was the character glitch.
 					tool:Activate()
+					waitSecs = swingSecs(tool)
 				end
 
-				-- Juice watchdog: no progress for STALL_SECS -> recover.
-				if now - lastWatch >= WATCH_EVERY then
-					lastWatch = now
-					local okJ, j = pcall(util.juiceCount)
-					if okJ and type(j) == "number" then
-						if lastJuice == nil then
-							lastJuice = j
-						elseif j ~= lastJuice then
-							lastJuice = j
-							lastProgress = now
-						end
-						if now - lastProgress >= STALL_SECS then
-							lastProgress = now -- one recovery per window
-							task.spawn(recover)
-						end
-					end
-				end
+				-- Watchdog + boundary keep running WHILE the swing plays
+				-- (sliced), so a stall is still caught on time.
+				local t0 = os.clock()
+				while swinging and runId == myGen and os.clock() - t0 < waitSecs do
+					local nowSlice = os.clock()
 
-				-- Boundary: never beyond RADIUS from the anchor.
-				if hrp and hum and anchor and not recovering then
-					if now - lastBoundary >= BOUNDARY_EVERY then
-						lastBoundary = now
-						local dir = hrp.Position - anchor
-						if dir.Magnitude > RADIUS then
-							pcall(function()
-								hum:MoveTo(anchor + dir.Unit * (RADIUS - 0.3))
-							end)
+					-- Juice watchdog: no progress for STALL_SECS -> recover.
+					if nowSlice - lastWatch >= WATCH_EVERY then
+						lastWatch = nowSlice
+						local okJ, j = pcall(util.juiceCount)
+						if okJ and type(j) == "number" then
+							if lastJuice == nil then
+								lastJuice = j
+							elseif j ~= lastJuice then
+								lastJuice = j
+								lastProgress = nowSlice
+							end
+							if nowSlice - lastProgress >= STALL_SECS then
+								lastProgress = nowSlice -- one recovery per window
+								task.spawn(recover)
+							end
 						end
 					end
+
+					-- Boundary: never beyond RADIUS from the anchor.
+					if hrp and hum and anchor and not recovering then
+						if nowSlice - lastBoundary >= BOUNDARY_EVERY then
+							lastBoundary = nowSlice
+							local dir = hrp.Position - anchor
+							if dir.Magnitude > RADIUS then
+								pcall(function()
+									hum:MoveTo(anchor + dir.Unit * (RADIUS - 0.3))
+								end)
+							end
+						end
+					end
+
+					task.wait(0.05)
 				end
 			end)
 			if not ok and os.clock() - lastErrAt >= ERR_WARN_EVERY then
@@ -2469,7 +2507,7 @@ return function(deps)
 			stopWalk()
 		end
 		if util and util.notify then
-			util.notify("Auto-mine", swinging and "ON - swinging while a pickaxe is equipped" or "OFF")
+			util.notify("Auto-mine", swinging and "ON - one click per completed swing" or "OFF")
 		end
 	end
 
