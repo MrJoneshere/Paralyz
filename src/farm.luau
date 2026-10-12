@@ -34,6 +34,19 @@ return function(deps)
 
 	local running = false
 	local thread: thread? = nil
+	-- Cross-reload generation (see perf.luau): old farm loops exit when a
+	-- newer generation claims, so reloads stop stacking miners/teleporters.
+	local GEN_KEY = "ParalyzGen_farm"
+	local function claimGen(): number
+		local env: any = getgenv()
+		local g = (env[GEN_KEY] or 0) + 1
+		env[GEN_KEY] = g
+		return g
+	end
+	local function genAlive(g: number): boolean
+		local env: any = getgenv()
+		return env[GEN_KEY] == g
+	end
 
 	-- Per-frame stance hold: gravity and depenetration beat a single CFrame
 	-- write, re-applying every RenderStepped frame is what was proven to hold.
@@ -480,7 +493,7 @@ return function(deps)
 	end
 
 	------------------------------------------------------------------- loop
-	local function runLoop(opts)
+	local function runLoop(opts, gen: number)
 		local maxCycles = opts and opts.maxCycles
 		local maxJuice = opts and opts.maxJuice
 
@@ -508,7 +521,7 @@ return function(deps)
 
 		startHold()
 
-		while running do
+		while running and genAlive(gen) do
 			syncCollision()
 
 			if maxJuice and gained >= maxJuice then
@@ -790,12 +803,14 @@ return function(deps)
 		running = true
 		cycles, gained, sold, fixes, switches = 0, 0, 0, 0, 0
 		setPhase("starting")
-		thread = task.spawn(runLoop, opts)
+		local gen = claimGen()
+		thread = task.spawn(runLoop, opts, gen)
 		return true
 	end
 
 	function farm.stop()
 		running = false
+		claimGen() -- invalidate any loop, including older generations
 		util.stopAim()
 		stopHold()
 		-- Restore immediately: the loop may still be sleeping out a wait.
