@@ -7,7 +7,7 @@
 -- Loadstring one-liner (once the repo is public):
 --   loadstring(game:HttpGet("https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/loader.luau"))()
 
-local VERSION = "0.2.1"
+local VERSION = "0.2.3"
 local BASE = "https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/src/"
 
 -- The bundler replaces this line with a literal table of module sources.

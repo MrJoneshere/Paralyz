@@ -412,18 +412,30 @@ local entries = {
 	{
 		id = "hub-mining-protocol",
 		cat = "Hub",
-		title = "Mining: how swings reach the server",
-		keys = "mining swing pickaxe server handshake subplace dupe rapid fire converter",
-		body = "Measured 2026-10-12 (subplace 77683185698128): each swing is a server-driven "
-			.. "handshake - server fires Pickaxe to the client, the client replies with the "
-			.. "mouse-target rock, server validates ~30-stud range then rolls the drop. "
-			.. "Unsolicited rapid fires are ignored (tested 3x, zero response, no kick) - "
-			.. "swing rate is fully server-gated, one validated swing per ~0.85s is the "
-			.. "ceiling (F7 minekey). Prompts arrive in pairs ~150ms apart during active "
-			.. "swinging. Server mints every real juice (no client template exists) - "
-			.. "client-made copies can never sell. This subplace has planets 6/11-15 only; "
-			.. "City holds a ConverterMachine with a one-way 'Insert Moonjuice' prompt "
-			.. "(no client listener attached).",
+		title = "Mining: how swings reach the server (aim gate + spam)",
+		keys = "mining swing pickaxe server handshake subplace dupe rapid fire converter aim target rock 30 studs gate assist cursor delay 5-20 seconds f7 spam",
+		body = "Measured 2026-10-12 (subplace 77683185698128 + main place): each swing "
+			.. "is a server-driven handshake - server fires Pickaxe to the client, "
+			.. "PickaxeController replies with Mouse.Target, server validates a rock "
+			.. "within ~30 studs then rolls the drop. Main place live trace: the query "
+			.. "arrives ~170ms after tool:Activate(), and anything that is not a rock "
+			.. "within 30 studs is answered then silently dropped - no swing animation, "
+			.. "no drop. That is the invisible 5-20s gap F7 showed while the aim sat "
+			.. "on ground/walls (measured target=Planets.Planet6.Center at 298 studs). "
+			.. "Unsolicited rapid fires are ignored (tested 3x, zero response, no "
+			.. "kick) - swing rate is fully server-gated, one validated swing per "
+			.. "~0.85s is the ceiling. minekey v0.2.3 therefore: AIM GATE (click only "
+			.. "while the target is a rock <=30), CURSOR ASSIST (executor mousemoverel "
+			.. "steers the real cursor onto the nearest on-screen rock - only while "
+			.. "the window is focused, cursor position restored on F7-off), and TAIL "
+			.. "SPAM 4 clicks/s across the last second of each swing so whichever "
+			.. "click lands after the server re-enables the tool starts the next "
+			.. "swing instantly (mid-swing fires are ignored server-side, no kick). "
+			.. "Prompts arrive in pairs ~150ms apart during active swinging. Server "
+			.. "mints every real juice (no client template exists) - client-made "
+			.. "copies can never sell. This subplace has planets 6/11-15 only; City "
+			.. "holds a ConverterMachine with a one-way 'Insert Moonjuice' prompt (no "
+			.. "client listener attached).",
 	},
 	{
 		id = "hub-gpu-map",
