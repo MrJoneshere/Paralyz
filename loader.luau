@@ -82,6 +82,10 @@ hover.start()
 -- see src/safezone.luau.
 local safezone = fetchModule("safezone")({ util = util })
 safezone.start()
+-- MoonJuice spawner: direct Tool creation at millisecond spacing + optional
+-- Planet1 swing fallback. GUI toggle only (no keybind); see
+-- src/moonjuice_farm.luau. Never started automatically.
+local moonjuicefarm = fetchModule("moonjuice_farm")({ util = util })
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -176,6 +180,11 @@ ui.button(farmTab, {
 			duration = 3,
 		})
 	end,
+})
+
+ui.moonjuicefarm_toggle(farmTab, "MoonJuiceFarm", {
+	name = "MoonJuice spawner",
+	description = "OFF by default. Spams client-side MoonJuice copies into the backpack (~25ms each) for drop/pickup practice - the server cannot see them, they can never sell. Real juice still comes from mining.",
 })
 
 ui.section(farmTab, "Wallet")
@@ -318,16 +327,8 @@ ui.section(settingsTab, "Performance")
 
 ui.toggle(settingsTab, "LowerUsage", {
 	name = "Lower Usage",
-	description = "Lowest quality, no shadows, no post effects, capped FPS. Cuts GPU load - off by default so the game stays nice to look at.",
+	description = "Frustum culling: parts the camera cannot see skip rendering. Nothing visible ever changes - no quality, shadow, lighting or frame-cap touches.",
 	value = false,
-})
-ui.slider(settingsTab, "FpsCap", {
-	name = "FPS cap",
-	description = "Frame cap while Lower Usage is on.",
-	range = { 10, 60 },
-	increment = 5,
-	value = config.perf.fps,
-	suffix = " fps",
 })
 
 ui.section(settingsTab, "Quality of Life")
@@ -451,16 +452,6 @@ local function applyLowerUsage(v)
 	window:Notify({ title = "Lower Usage", content = report, duration = 4 })
 end
 
-local function applyFpsCap(v)
-	if typeof(v) ~= "number" then
-		return
-	end
-	config.perf.fps = v
-	if state.get("LowerUsage") and setfpscap then
-		pcall(setfpscap, v)
-	end
-end
-
 local function applyInstantPrompts(v)
 	if v then
 		instantprompts.start()
@@ -536,14 +527,22 @@ state.on("BlackScreen", function(value)
 end)
 
 state.on("LowerUsage", applyLowerUsage)
-state.on("FpsCap", applyFpsCap)
+
+local function applyMoonJuiceFarm(v)
+	if v == true then
+		moonjuicefarm.start()
+	else
+		moonjuicefarm.stop()
+	end
+end
+
+state.on("MoonJuiceFarm", applyMoonJuiceFarm)
 
 -- The config sliders may already hold values restored by autoLoad, and their
 -- callbacks ran before these subscriptions existed: replay them once.
 applySellAt(state.get("SellAt"))
 applySwingDelay(state.get("SwingDelay"))
 applyFlySpeed(state.get("FlySpeed"))
-applyFpsCap(state.get("FpsCap"))
 setBlackScreen(state.get("BlackScreen") == true)
 
 -- Hidden mining is the default way to farm (user decision): make it true on
@@ -580,6 +579,11 @@ if state.get("LowerUsage") == nil then
 	state.set("LowerUsage", false)
 else
 	applyLowerUsage(state.get("LowerUsage"))
+end
+-- MoonJuice spawner: never auto-starts on a fresh boot, but an autoLoad
+-- restore of ON is honored so a rejoin resumes spawning.
+if state.get("MoonJuiceFarm") == true then
+	applyMoonJuiceFarm(true)
 end
 -- Instant prompts on by default (they asked for it); the toggle seeds from
 -- saved config when present, so a saved off stays off.
@@ -750,6 +754,7 @@ shutdown = function()
 	flystand.stop()
 	hover.stop()
 	safezone.stop()
+	moonjuicefarm.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -789,6 +794,7 @@ if getgenv then
 		flystand = flystand,
 		hover = hover,
 		safezone = safezone,
+		moonjuicefarm = moonjuicefarm,
 		knowledge = knowledge,
 	}
 end

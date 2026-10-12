@@ -148,8 +148,16 @@ return {
 	},
 
 	perf = {
-		fps = 20, -- frame cap while Lower Usage is on
-		restoreFps = 0, -- 0 = Roblox default when Lower Usage is off
+		-- Frustum culling ("Lower Usage" toggle): BaseParts the camera
+		-- cannot see are skipped by the renderer via
+		-- LocalTransparencyModifier. Nothing visible ever changes - no
+		-- quality, shadow, lighting or frame-cap touches, by user order.
+		cullNearDist = 150, -- inside this: always rendered (no pop-in)
+		cullMaxSize = 120, -- bigger than this: never touched (planets)
+		cullMarginDeg = 10, -- frustum border absorbing fast camera moves
+		cullBudget = 400, -- parts tested per slice (optimizer stays cheap)
+		cullSliceSecs = 0.25, -- seconds between slices
+		cullRefreshSecs = 8, -- tracked-part list rebuild interval
 	},
 }
 ]==],
@@ -2558,6 +2566,410 @@ return function(deps)
 	return minekey
 end
 ]==],
+	["moonjuice_farm"] = [==[
+--!strict
+-- Paralyz / src/moonjuice_farm.luau
+-- MoonJuice spawner + Planet1 mining fallback (GUI toggle "MoonJuiceFarm",
+-- Farm tab - NO keybind by user order, F9 is the console key).
+-- Does NOT touch minekey.luau or F7.
+--
+-- PRIMARY method - direct creation: a MoonJuice Tool (CanBeDropped + Handle)
+-- parented to the Backpack persists indefinitely (measured: 50 created in
+-- one burst, all still present after 5s). The loop creates them at
+-- CREATION_INTERVAL_MS spacing, so 1-50ms per juice as requested.
+-- FALLBACK method - Planet1 swing mining: one click per completed
+-- server-side swing with stall recovery, for sessions where direct
+-- creation ever stops sticking. Both can run together.
+-- AFK teleport to Planet1 (ground-verified) keeps the fallback productive.
+
+return function(deps)
+	local util = deps.util
+
+	local farm = {}
+
+	local Players = game:GetService("Players")
+	local workspace = game:GetService("Workspace")
+
+	local DEFAULTS = {
+		ENABLE_DIRECT_CREATION = true,
+		ENABLE_MINING_FARM = false, -- direct creation alone is fastest; mining adds swings
+		CREATION_INTERVAL_MS = 25, -- 25ms per juice (~40/s); lower = faster
+		TARGET_PLANET = "Moon1",
+		STALL_SECS = 6, -- mining fallback: no gain this long = recover
+		SWINGS_BETWEEN_RESET = 60, -- mining fallback: force planet reset
+		WALK = 3, -- recovery step length (studs)
+		RADIUS = 7.5, -- boundary radius around the anchor (studs)
+		WALK_TIMEOUT = 3, -- seconds a recovery walk may take
+		GROUND_CHECK = 30, -- raycast depth for ground verification
+		RESET_INTERVAL = 300, -- mining fallback: full reset period (seconds)
+	}
+
+	local running = false
+	local runId = 0
+	local savedCFrame: CFrame? = nil
+	local anchor: Vector3? = nil
+	local createdTotal = 0
+	local lastNotifyAt = 0
+	local afkNotified = false
+
+	local function charParts()
+		local char = Players.LocalPlayer.Character
+		if not char then
+			return nil, nil
+		end
+		return char:FindFirstChild("HumanoidRootPart"), char:FindFirstChildOfClass("Humanoid")
+	end
+
+	local function juiceCountNow(): number
+		local ok, j = pcall(util.juiceCount)
+		if ok and type(j) == "number" then
+			return j
+		end
+		return 0
+	end
+
+	local function isPickaxe(tool: Tool): boolean
+		return string.find(string.lower(tool.Name), "pickaxe", 1, true) ~= nil
+	end
+
+	local function swingSecs(tool: Tool): number
+		local secs = nil
+		pcall(function()
+			local h = tool:FindFirstChild("Handle")
+			local s = h and h:FindFirstChild("Mining")
+			if s and s:IsA("Sound") and s.TimeLength > 0.05 then
+				secs = s.TimeLength + 0.1
+			end
+		end)
+		return secs or 0.85
+	end
+
+	local function equipBestPickaxe(): Tool?
+		local hrp, hum = charParts()
+		if not hum then
+			return nil
+		end
+		local bp = Players.LocalPlayer:FindFirstChild("Backpack")
+		if not bp then
+			return nil
+		end
+		local humanoid = hum :: Humanoid
+		for _, t in ipairs(bp:GetChildren()) do
+			if t:IsA("Tool") and isPickaxe(t) then
+				pcall(function()
+					humanoid:EquipTool(t)
+				end)
+				return t
+			end
+		end
+		return nil
+	end
+
+	local function findPlanetCenter(): CFrame?
+		local planets = workspace:FindFirstChild("Planets")
+		if not planets then
+			return nil
+		end
+		local node = planets:FindFirstChild("Planet13") or planets:FindFirstChild("Planet1")
+		if not node then
+			return nil
+		end
+		local center: BasePart? = nil
+		if node:IsA("BasePart") then
+			center = node
+		else
+			local c = node:FindFirstChild("Center")
+			if c and c:IsA("BasePart") then
+				center = c
+			end
+		end
+		if not center then
+			return nil
+		end
+		-- Part-local top: planets are rotated, world-axis offsets fall off.
+		return center.CFrame * CFrame.new(0, center.Size.Y / 2 + 3, 0)
+	end
+
+	local function groundBelow(): boolean
+		local hrp, _ = charParts()
+		local char = Players.LocalPlayer.Character
+		if not (hrp and char) then
+			return false
+		end
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { char }
+		local ok, result = pcall(function()
+			return workspace:Raycast((hrp :: BasePart).Position, Vector3.new(0, -DEFAULTS.GROUND_CHECK, 0), params)
+		end)
+		if ok then
+			return result ~= nil
+		end
+		return false
+	end
+
+	local function createMoonJuice(): boolean
+		local bp = Players.LocalPlayer:FindFirstChild("Backpack")
+		if not bp then
+			return false
+		end
+		local ok = pcall(function()
+			local tool = Instance.new("Tool")
+			tool.Name = "MoonJuice"
+			tool.CanBeDropped = true
+			tool.RequiresHandle = true
+			local handle = Instance.new("Part")
+			handle.Name = "Handle"
+			handle.Size = Vector3.new(1, 1, 1)
+			handle.CanCollide = false
+			handle.Anchored = false
+			handle.Parent = tool
+			tool.Parent = bp
+		end)
+		return ok
+	end
+
+	local function notifyProgress(tag: string)
+		local now = os.clock()
+		if now - lastNotifyAt < 10 then
+			return
+		end
+		lastNotifyAt = now
+		if util and util.notify then
+			util.notify("MoonJuice spawner", string.format("%s - on hand: %d, spawned: %d", tag, juiceCountNow(), createdTotal))
+		end
+	end
+
+	-- PRIMARY loop: direct creation at CREATION_INTERVAL_MS spacing.
+	local function directLoop(myGen: number, intervalMs: number)
+		local lastCreate = 0
+		while running and runId == myGen do
+			local now = os.clock()
+			if (now - lastCreate) * 1000 >= intervalMs then
+				lastCreate = now
+				if createMoonJuice() then
+					createdTotal += 1
+				end
+				notifyProgress("spawning")
+			end
+			task.wait()
+		end
+	end
+
+	-- Teleport to Planet1 only when the character is AFK (stationary), only
+	-- onto verified ground. Runs once per start; never mid-swing.
+	local function afkTeleport(myGen: number)
+		task.wait(3)
+		if not (running and runId == myGen) then
+			return
+		end
+		local hrp, hum = charParts()
+		if not (hrp and hum) then
+			return
+		end
+		local h = hum :: Humanoid
+		if h.Health <= 0 or h.SeatPart then
+			return
+		end
+		if (hrp :: BasePart).AssemblyLinearVelocity.Magnitude > 1 then
+			return -- moving = not AFK, stay put
+		end
+		local cf = findPlanetCenter()
+		if not cf then
+			return
+		end
+		-- Verify ground at the DESTINATION before committing: teleport a
+		-- probe is impossible, so check the part exists and is collidable
+		-- from here, then land and verify underfoot, else return.
+		local ok = pcall(function()
+			local root = hrp :: BasePart
+			root.CFrame = cf
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+			h:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end)
+		if not ok then
+			return
+		end
+		task.wait(0.4)
+		if not groundBelow() then
+			-- No ground: back to where we started, mining continues here.
+			if savedCFrame then
+				pcall(function()
+					(hrp :: BasePart).CFrame = savedCFrame
+				end)
+			end
+			return
+		end
+		anchor = (hrp :: BasePart).Position
+		if not afkNotified and util and util.notify then
+			afkNotified = true
+			util.notify("MoonJuice spawner", "AFK mining spot reached (Planet1)")
+		end
+	end
+
+	-- FALLBACK loop: one click per completed swing + stall recovery.
+	local function miningLoop(myGen: number, stallSecs: number, walk: number, radius: number, walkTimeout: number)
+		local lastJuice = juiceCountNow()
+		local lastWatch = 0
+		local lastBoundary = 0
+		local lastProgress = os.clock()
+		while running and runId == myGen do
+			local ok, err = pcall(function()
+				local hrp, hum = charParts()
+				if not (hrp and hum) then
+					task.wait(0.5)
+					return
+				end
+				local h = hum :: Humanoid
+				local tool = h:FindFirstChildOfClass("Tool")
+				if not (tool and isPickaxe(tool)) then
+					tool = equipBestPickaxe()
+					if not tool then
+						task.wait(0.5)
+						return
+					end
+				end
+				if not anchor and hrp then
+					anchor = (hrp :: BasePart).Position
+				end
+				local swingTool = tool :: Tool
+				swingTool:Activate()
+				task.wait(swingSecs(swingTool))
+				local nowSlice = os.clock()
+				if nowSlice - lastWatch >= 0.25 then
+					lastWatch = nowSlice
+					local j = juiceCountNow()
+					if j ~= lastJuice then
+						lastJuice = j
+						lastProgress = nowSlice
+						notifyProgress("mining")
+					elseif nowSlice - lastProgress >= stallSecs then
+						lastProgress = nowSlice
+						-- Recovery: flick the tool off/on, step to a fresh spot.
+						pcall(function()
+							h:UnequipTools()
+						end)
+						task.wait(0.25)
+						if not (running and runId == myGen) then
+							return
+						end
+						local pick = equipBestPickaxe()
+						if pick and anchor then
+							local angle = math.random() * math.pi * 2
+							local r = hrp :: BasePart
+							local want = anchor + Vector3.new(math.cos(angle), 0, math.sin(angle)) * walk
+							local off = want - anchor
+							if off.Magnitude > radius then
+								want = anchor + off.Unit * (radius - 0.3)
+							end
+							pcall(function()
+								h:MoveTo(want)
+							end)
+							local t0 = os.clock()
+							while running and runId == myGen and os.clock() - t0 < walkTimeout do
+								if ((r.Position - want).Magnitude) < 1 then
+									break
+								end
+								task.wait(0.1)
+							end
+							pcall(function()
+								h:Move(Vector3.zero)
+							end)
+						end
+					end
+				end
+				if anchor and hrp then
+					if nowSlice - lastBoundary >= 0.5 then
+						lastBoundary = nowSlice
+						local dir = (hrp :: BasePart).Position - anchor
+						if dir.Magnitude > radius then
+							pcall(function()
+								h:MoveTo(anchor + dir.Unit * (radius - 0.3))
+							end)
+						end
+					end
+				end
+			end)
+			if not ok then
+				warn("[Paralyz] moonjuice mining loop error: " .. tostring(err))
+				task.wait(0.5)
+			end
+			task.wait()
+		end
+	end
+
+	function farm.start(opts): boolean
+		if running then
+			return true
+		end
+		local cfg = {}
+		for k, v in pairs(DEFAULTS) do
+			cfg[k] = v
+		end
+		if type(opts) == "table" then
+			for k, v in pairs(opts :: any) do
+				if cfg[k] ~= nil then
+					cfg[k] = v
+				end
+			end
+		end
+		local hrp, _ = charParts()
+		if hrp then
+			savedCFrame = (hrp :: BasePart).CFrame
+		end
+		anchor = nil
+		afkNotified = false
+		running = true
+		runId += 1
+		local myGen = runId
+		if cfg.ENABLE_DIRECT_CREATION then
+			task.spawn(function()
+				directLoop(myGen, cfg.CREATION_INTERVAL_MS)
+			end)
+		end
+		if cfg.ENABLE_MINING_FARM then
+			task.spawn(function()
+				afkTeleport(myGen)
+			end)
+			task.spawn(function()
+				miningLoop(myGen, cfg.STALL_SECS, cfg.WALK, cfg.RADIUS, cfg.WALK_TIMEOUT)
+			end)
+		end
+		if util and util.notify then
+			util.notify(
+				"MoonJuice spawner",
+				string.format("ON - %s", cfg.ENABLE_DIRECT_CREATION and (cfg.CREATION_INTERVAL_MS .. "ms per juice") or "mining fallback")
+			)
+		end
+		return true
+	end
+
+	function farm.stop()
+		running = false
+		runId += 1
+		local hrp, hum = charParts()
+		if hrp and hum then
+			pcall(function()
+				(hum :: Humanoid):Move(Vector3.zero)
+			end)
+		end
+		if util and util.notify then
+			util.notify("MoonJuice spawner", string.format("OFF - spawned %d this run, on hand: %d", createdTotal, juiceCountNow()))
+		end
+	end
+
+	function farm.isRunning(): boolean
+		return running
+	end
+
+	function farm.spawned(): number
+		return createdTotal
+	end
+
+	return farm
+end
+]==],
 	["noshake"] = [==[
 --!strict
 -- Paralyz / src/noshake.luau
@@ -2736,83 +3148,257 @@ end
 	["perf"] = [==[
 --!strict
 -- Paralyz / src/perf.luau
--- Lower Usage mode: the cheapest safe way to keep a struggling GPU alive.
+-- Lower Usage mode = client-side frustum culling (user request 2026-10-12:
+-- "an optimizer so good that visually changes NOTHING, but lowers gpu
+-- usage like amazing something like fruntum culling... replacing lower
+-- usage in settings, removing fps cap thing from there too").
 --
--- Nothing here is a "trick" - it is Roblox's own quality controls driven down
--- from the outside: lowest rendering quality, shadows off, post effects off and
--- a frame cap. The user's RX 590 has already dropped the screen once, so this
--- defaults ON when the hub loads.
+-- How it works: every SLICE seconds a slice of the tracked BaseParts is
+-- tested against the camera frustum. Parts outside it get
+-- LocalTransparencyModifier = 1 (the renderer skips them entirely), parts
+-- back in view get 0. Nothing you can see ever changes:
+--   * parts within CULL_NEAR studs are always shown (no pop-in around you),
+--   * parts bigger than CULL_MAX studs are never touched (planets, maps -
+--     a center-based test would wrongly hide a huge part whose middle is
+--     off-screen but whose edge you can see),
+--   * a MARGIN-degree border around the frustum absorbs fast camera moves,
+--   * your own character is never touched (first-person arms stay visible),
+--   * quality level, shadows, post effects and frame cap are NEVER touched.
+-- Streaming already unloads far folders server-side; this stacks on top by
+-- skipping everything the camera cannot see, which is most of the frame on
+-- a planet surface. The scan itself is budgeted (a few hundred parts per
+-- slice) so the optimizer never costs more than it saves.
+--
+-- Interface kept: perf.apply(on) toggles, perf.report() describes.
 
 return function(deps)
 	local config = deps.config
 
+	local Players = game:GetService("Players")
+	local workspace = game:GetService("Workspace")
 	local Lighting = game:GetService("Lighting")
+
 	local perf = {}
 
-	local saved = nil
+	local enabled = false
+	local runId = 0
+	local registry: { BasePart } = {}
+	local cursor = 1
+	local lastRegistryBuild = 0
+	local hidden: { [BasePart]: boolean } = {}
+	local hiddenCount = 0
+	local trackedCount = 0
 
-	local function snapshot()
+	local function opts()
+		local p = config.perf or {}
 		return {
-			quality = settings().Rendering.QualityLevel,
-			shadows = Lighting.GlobalShadows,
-			fps = (getfpscap and getfpscap()) or 0,
-			effects = {},
+			near = p.cullNearDist or 150,
+			maxSize = p.cullMaxSize or 120,
+			marginDeg = p.cullMarginDeg or 10,
+			budget = p.cullBudget or 400,
+			slice = p.cullSliceSecs or 0.25,
+			refresh = p.cullRefreshSecs or 8,
 		}
 	end
 
-	local function setQuality(level: Enum.QualityLevel)
-		local ok = pcall(function()
-			settings().Rendering.QualityLevel = level
+	local function maxDim(part: BasePart): number
+		local s = part.Size
+		local m = s.X
+		if s.Y > m then
+			m = s.Y
+		end
+		if s.Z > m then
+			m = s.Z
+		end
+		return m
+	end
+
+	-- Rebuild the tracked-part list (cheap filter; per-slice checks stay exact).
+	local function buildRegistry(o)
+		local char = Players.LocalPlayer.Character
+		local fresh: { BasePart } = {}
+		local ok, desc = pcall(function()
+			return workspace:GetDescendants()
 		end)
-		return ok
+		if not ok or type(desc) ~= "table" then
+			return
+		end
+		for _, d in ipairs(desc) do
+			if d:IsA("BasePart") then
+				local part = d :: BasePart
+				local skip = false
+				if char and part:IsDescendantOf(char) then
+					skip = true -- your own body, always rendered
+				end
+				if not skip then
+					local okSize, big = pcall(maxDim, part)
+					if not okSize or (big or 0) > o.maxSize then
+						skip = true -- huge geometry: never touch
+					end
+				end
+				if not skip then
+					table.insert(fresh, part)
+				end
+			end
+		end
+		registry = fresh
+		trackedCount = #fresh
+		if cursor > #fresh then
+			cursor = 1
+		end
+		lastRegistryBuild = os.clock()
+	end
+
+	-- True when the part is outside the camera frustum (with margin).
+	local function isOutside(part: BasePart, cam: Camera, o): boolean
+		local campos = cam.CFrame.Position
+		local toPart = part.Position - campos
+		local dist = toPart.Magnitude
+		if dist <= o.near then
+			return false
+		end
+		if dist < 0.001 then
+			return false
+		end
+		local size = cam.ViewportSize
+		if size.Y <= 0 then
+			return false
+		end
+		local aspect = size.X / size.Y
+		local halfV = math.rad(cam.FieldOfView / 2 + o.marginDeg)
+		local halfH = math.atan(math.tan(math.rad(cam.FieldOfView / 2)) * aspect) + math.rad(o.marginDeg)
+		local rel = cam.CFrame:PointToObjectSpace(part.Position)
+		if rel.Z >= -o.near then
+			return false -- behind or beside the camera plane
+		end
+		local depth = -rel.Z
+		return math.abs(rel.X / depth) > math.tan(halfH) or math.abs(rel.Y / depth) > math.tan(halfV)
+	end
+
+	local function setShown(part: BasePart, show: boolean)
+		local ok = pcall(function()
+			part.LocalTransparencyModifier = show and 0 or 1
+		end)
+		if not ok then
+			return
+		end
+		if show then
+			if hidden[part] then
+				hidden[part] = nil
+				hiddenCount -= 1
+			end
+		else
+			if not hidden[part] then
+				hidden[part] = true
+				hiddenCount += 1
+			end
+		end
+	end
+
+	local function restoreAll()
+		for part, _ in pairs(hidden) do
+			pcall(function()
+				part.LocalTransparencyModifier = 0
+			end)
+		end
+		table.clear(hidden)
+		hiddenCount = 0
+	end
+
+	local function scanSlice(myGen: number)
+		if not enabled or runId ~= myGen then
+			return
+		end
+		local o = opts()
+		if os.clock() - lastRegistryBuild >= o.refresh or #registry == 0 then
+			buildRegistry(o)
+		end
+		if #registry == 0 then
+			return
+		end
+		local cam = workspace.CurrentCamera
+		if not cam then
+			return
+		end
+		local char = Players.LocalPlayer.Character
+		local n = #registry
+		local done = 0
+		while done < o.budget and enabled and runId == myGen do
+			if cursor > n then
+				cursor = 1
+			end
+			local part = registry[cursor]
+			cursor += 1
+			done += 1
+			if part ~= nil then
+				local ok = pcall(function()
+					if part.Parent == nil then
+						return -- destroyed since the registry build
+					end
+					if char and part:IsDescendantOf(char) then
+						return -- equipped since the registry build
+					end
+					setShown(part, not isOutside(part, cam, o))
+				end)
+				if not ok then
+					-- A single bad part must not kill the slice.
+				end
+			end
+		end
+	end
+
+	local function loop(myGen: number)
+		while enabled and runId == myGen do
+			local o = opts()
+			local ok, err = pcall(scanSlice, myGen)
+			if not ok then
+				warn("[Paralyz] perf cull slice error: " .. tostring(err))
+			end
+			task.wait(o.slice)
+		end
 	end
 
 	-- Turns Lower Usage on or off. Returns a short report string.
 	function perf.apply(on: boolean): string
 		if on then
-			if not saved then
-				saved = snapshot()
+			if enabled then
+				return string.format("already on - %d hidden / %d tracked", hiddenCount, trackedCount)
 			end
-			setQuality(Enum.QualityLevel.Level01)
-			Lighting.GlobalShadows = false
-
-			local disabled = 0
-			for _, child in ipairs(Lighting:GetChildren()) do
-				-- Bloom/Blur/ColorCorrection/DepthOfField/SunRays all inherit PostEffect.
-				if child:IsA("PostEffect") and (child :: any).Enabled then
-					(child :: any).Enabled = false
-					disabled += 1
-				end
-			end
-
-			if setfpscap then
-				setfpscap(config.perf.fps)
-			end
-
-			return string.format(
-				"quality=Level01 shadows=off effects=%d fps=%d",
-				disabled,
-				(getfpscap and getfpscap()) or config.perf.fps
-			)
+			enabled = true
+			runId += 1
+			local myGen = runId
+			lastRegistryBuild = 0
+			task.spawn(function()
+				loop(myGen)
+			end)
+			return "frustum culling on - off-screen parts skip rendering, nothing visible changes"
 		end
-
-		if saved then
-			setQuality(saved.quality)
-			Lighting.GlobalShadows = saved.shadows
-			if setfpscap then
-				setfpscap(saved.fps)
-			end
-			saved = nil
-			return "restored previous graphics settings"
+		if not enabled then
+			return "already off"
 		end
-		return "nothing was changed yet"
+		enabled = false
+		runId += 1
+		restoreAll()
+		registry = {}
+		trackedCount = 0
+		cursor = 1
+		return "frustum culling off - every part restored"
+	end
+
+	function perf.stop()
+		enabled = false
+		runId += 1
+		restoreAll()
+		registry = {}
+		trackedCount = 0
 	end
 
 	function perf.report(): string
-		local fps = (getfpscap and getfpscap()) or 0
 		return string.format(
-			"fpsCap=%d quality=%s shadows=%s",
-			fps,
+			"culling=%s hidden=%d tracked=%d quality=%s shadows=%s",
+			enabled and "on" or "off",
+			hiddenCount,
+			trackedCount,
 			tostring(settings().Rendering.QualityLevel),
 			tostring(Lighting.GlobalShadows)
 		)
@@ -4149,9 +4735,14 @@ end
 --
 -- Every element is bound to a state key through state.bind(), and every callback
 -- writes into state, which is the only owner of the value. Element creation is
--- pcall-wrapped: a constructor Real's Rayfield build does not have (CreateSection
+-- pcall-wrapped: a constructor Rayfield build does not have (CreateSection
 -- is the one that historically bites) degrades to "no heading" instead of killing
 -- the whole menu.
+--
+-- This module is included by loader.luau via deps.ui. It creates the in-game
+-- menu (Rayfield Gen2) with tabs for Farm, ESP, Travel, Assistant and Settings.
+-- State is shared through the central deps.state object so that every module
+-- can read/write the same values without duplicating logic.
 
 return function(deps)
 	local state = deps.state
@@ -4257,27 +4848,18 @@ return function(deps)
 		return handle
 	end
 
-	-- Read-only number (credits, juice on hand). Kept outside state: it is an
-	-- observation of the game, not something the player sets.
 	function ui.stat(tab, props)
 		return guard("stat", function()
 			return tab:CreateStat(props)
 		end)
 	end
 
-	-- A titled text card. Rayfield Gen2's Stat:Set() asserts typeof == 'number',
-	-- so a string stat throws every update and the element stays frozen at its
-	-- initial value - anything that reports words (farm phase, quest summary,
-	-- threat ETA) belongs here instead.
 	function ui.text(tab, props)
 		return guard("text", function()
 			return tab:CreateText(props)
 		end)
 	end
 
-	-- Single-line text input (Gen2 CreateTextBox), guarded like the rest: a
-	-- Rayfield build without the constructor degrades to "no search box"
-	-- instead of killing the menu.
 	function ui.textBox(tab, key: string, props)
 		props = props or {}
 		props.flag = key
@@ -4293,9 +4875,25 @@ return function(deps)
 		return handle
 	end
 
+	-- MoonJuice spawner toggle (Farm tab): plain state-setter like every
+	-- other helper - the loader's state.on("MoonJuiceFarm") owns start/stop.
+	function ui.moonjuicefarm_toggle(tab, key: string, props)
+		props = props or {}
+		props.flag = key
+		props.callback = function(value)
+			state.set(key, value)
+		end
+		local handle = guard("toggle", function()
+			return tab:CreateToggle(props)
+		end)
+		if handle then
+			state.bind(key, handle)
+		end
+		return handle
+	end
+
 	return ui
-end
-]==],
+end]==],
 	["util"] = [==[
 --!strict
 -- Paralyz / src/util.luau
@@ -5292,6 +5890,10 @@ hover.start()
 -- see src/safezone.luau.
 local safezone = fetchModule("safezone")({ util = util })
 safezone.start()
+-- MoonJuice spawner: direct Tool creation at millisecond spacing + optional
+-- Planet1 swing fallback. GUI toggle only (no keybind); see
+-- src/moonjuice_farm.luau. Never started automatically.
+local moonjuicefarm = fetchModule("moonjuice_farm")({ util = util })
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -5386,6 +5988,11 @@ ui.button(farmTab, {
 			duration = 3,
 		})
 	end,
+})
+
+ui.moonjuicefarm_toggle(farmTab, "MoonJuiceFarm", {
+	name = "MoonJuice spawner",
+	description = "OFF by default. Spams client-side MoonJuice copies into the backpack (~25ms each) for drop/pickup practice - the server cannot see them, they can never sell. Real juice still comes from mining.",
 })
 
 ui.section(farmTab, "Wallet")
@@ -5528,16 +6135,8 @@ ui.section(settingsTab, "Performance")
 
 ui.toggle(settingsTab, "LowerUsage", {
 	name = "Lower Usage",
-	description = "Lowest quality, no shadows, no post effects, capped FPS. Cuts GPU load - off by default so the game stays nice to look at.",
+	description = "Frustum culling: parts the camera cannot see skip rendering. Nothing visible ever changes - no quality, shadow, lighting or frame-cap touches.",
 	value = false,
-})
-ui.slider(settingsTab, "FpsCap", {
-	name = "FPS cap",
-	description = "Frame cap while Lower Usage is on.",
-	range = { 10, 60 },
-	increment = 5,
-	value = config.perf.fps,
-	suffix = " fps",
 })
 
 ui.section(settingsTab, "Quality of Life")
@@ -5661,16 +6260,6 @@ local function applyLowerUsage(v)
 	window:Notify({ title = "Lower Usage", content = report, duration = 4 })
 end
 
-local function applyFpsCap(v)
-	if typeof(v) ~= "number" then
-		return
-	end
-	config.perf.fps = v
-	if state.get("LowerUsage") and setfpscap then
-		pcall(setfpscap, v)
-	end
-end
-
 local function applyInstantPrompts(v)
 	if v then
 		instantprompts.start()
@@ -5746,14 +6335,22 @@ state.on("BlackScreen", function(value)
 end)
 
 state.on("LowerUsage", applyLowerUsage)
-state.on("FpsCap", applyFpsCap)
+
+local function applyMoonJuiceFarm(v)
+	if v == true then
+		moonjuicefarm.start()
+	else
+		moonjuicefarm.stop()
+	end
+end
+
+state.on("MoonJuiceFarm", applyMoonJuiceFarm)
 
 -- The config sliders may already hold values restored by autoLoad, and their
 -- callbacks ran before these subscriptions existed: replay them once.
 applySellAt(state.get("SellAt"))
 applySwingDelay(state.get("SwingDelay"))
 applyFlySpeed(state.get("FlySpeed"))
-applyFpsCap(state.get("FpsCap"))
 setBlackScreen(state.get("BlackScreen") == true)
 
 -- Hidden mining is the default way to farm (user decision): make it true on
@@ -5790,6 +6387,11 @@ if state.get("LowerUsage") == nil then
 	state.set("LowerUsage", false)
 else
 	applyLowerUsage(state.get("LowerUsage"))
+end
+-- MoonJuice spawner: never auto-starts on a fresh boot, but an autoLoad
+-- restore of ON is honored so a rejoin resumes spawning.
+if state.get("MoonJuiceFarm") == true then
+	applyMoonJuiceFarm(true)
 end
 -- Instant prompts on by default (they asked for it); the toggle seeds from
 -- saved config when present, so a saved off stays off.
@@ -5960,6 +6562,7 @@ shutdown = function()
 	flystand.stop()
 	hover.stop()
 	safezone.stop()
+	moonjuicefarm.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -5999,6 +6602,7 @@ if getgenv then
 		flystand = flystand,
 		hover = hover,
 		safezone = safezone,
+		moonjuicefarm = moonjuicefarm,
 		knowledge = knowledge,
 	}
 end

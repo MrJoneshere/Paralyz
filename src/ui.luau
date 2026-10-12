@@ -4,9 +4,14 @@
 --
 -- Every element is bound to a state key through state.bind(), and every callback
 -- writes into state, which is the only owner of the value. Element creation is
--- pcall-wrapped: a constructor Real's Rayfield build does not have (CreateSection
+-- pcall-wrapped: a constructor Rayfield build does not have (CreateSection
 -- is the one that historically bites) degrades to "no heading" instead of killing
 -- the whole menu.
+--
+-- This module is included by loader.luau via deps.ui. It creates the in-game
+-- menu (Rayfield Gen2) with tabs for Farm, ESP, Travel, Assistant and Settings.
+-- State is shared through the central deps.state object so that every module
+-- can read/write the same values without duplicating logic.
 
 return function(deps)
 	local state = deps.state
@@ -112,27 +117,18 @@ return function(deps)
 		return handle
 	end
 
-	-- Read-only number (credits, juice on hand). Kept outside state: it is an
-	-- observation of the game, not something the player sets.
 	function ui.stat(tab, props)
 		return guard("stat", function()
 			return tab:CreateStat(props)
 		end)
 	end
 
-	-- A titled text card. Rayfield Gen2's Stat:Set() asserts typeof == 'number',
-	-- so a string stat throws every update and the element stays frozen at its
-	-- initial value - anything that reports words (farm phase, quest summary,
-	-- threat ETA) belongs here instead.
 	function ui.text(tab, props)
 		return guard("text", function()
 			return tab:CreateText(props)
 		end)
 	end
 
-	-- Single-line text input (Gen2 CreateTextBox), guarded like the rest: a
-	-- Rayfield build without the constructor degrades to "no search box"
-	-- instead of killing the menu.
 	function ui.textBox(tab, key: string, props)
 		props = props or {}
 		props.flag = key
@@ -141,6 +137,23 @@ return function(deps)
 		end
 		local handle = guard("textBox", function()
 			return tab:CreateTextBox(props)
+		end)
+		if handle then
+			state.bind(key, handle)
+		end
+		return handle
+	end
+
+	-- MoonJuice spawner toggle (Farm tab): plain state-setter like every
+	-- other helper - the loader's state.on("MoonJuiceFarm") owns start/stop.
+	function ui.moonjuicefarm_toggle(tab, key: string, props)
+		props = props or {}
+		props.flag = key
+		props.callback = function(value)
+			state.set(key, value)
+		end
+		local handle = guard("toggle", function()
+			return tab:CreateToggle(props)
 		end)
 		if handle then
 			state.bind(key, handle)

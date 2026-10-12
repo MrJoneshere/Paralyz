@@ -133,7 +133,15 @@ return {
 	},
 
 	perf = {
-		fps = 20, -- frame cap while Lower Usage is on
-		restoreFps = 0, -- 0 = Roblox default when Lower Usage is off
+		-- Frustum culling ("Lower Usage" toggle): BaseParts the camera
+		-- cannot see are skipped by the renderer via
+		-- LocalTransparencyModifier. Nothing visible ever changes - no
+		-- quality, shadow, lighting or frame-cap touches, by user order.
+		cullNearDist = 150, -- inside this: always rendered (no pop-in)
+		cullMaxSize = 120, -- bigger than this: never touched (planets)
+		cullMarginDeg = 10, -- frustum border absorbing fast camera moves
+		cullBudget = 400, -- parts tested per slice (optimizer stays cheap)
+		cullSliceSecs = 0.25, -- seconds between slices
+		cullRefreshSecs = 8, -- tracked-part list rebuild interval
 	},
 }
