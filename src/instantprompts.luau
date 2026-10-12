@@ -14,6 +14,9 @@
 --     the connection or spam errors.
 --   * start() is idempotent (conn guard), stop() disconnects cleanly - same
 --     reconnect-first shape as IY's execCmd("uninstantproximityprompts").
+--   * util.singleOwner: after a live-reload the OLDER generation still holds
+--     the one real connection, so start/stop/isRunning delegate to it and the
+--     reloaded menu keeps steering that connection instead of a dead local.
 
 return function(deps)
 	local util = deps.util
@@ -22,16 +25,19 @@ return function(deps)
 
 	local PPS = game:GetService("ProximityPromptService")
 	local conn: RBXScriptConnection? = nil
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner (owner identity).
+	local IMPL: any = {}
 
 	local function fire(prompt: ProximityPrompt)
 		pcall(fireproximityprompt, prompt)
 	end
 
 	function instantprompts.start()
+		local ctl = util.singleOwner("conn_instantprompts", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live connection
+			return
+		end
 		if conn then
 			return
 		end
@@ -41,20 +47,18 @@ return function(deps)
 			end
 			return
 		end
-		if not owns then
-			-- Reload-safety: stacked hold-began connections multi-fire
-			-- every prompt. Oldest generation owns it forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_conn_instantprompts"] then
-				return
-			end
-			env["ParalyzOwn_conn_instantprompts"] = true
-			owns = true
-		end
 		conn = PPS.PromptButtonHoldBegan:Connect(fire)
 	end
 
 	function instantprompts.stop()
+		local ctl = util.stopOwner("conn_instantprompts", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		if conn then
 			conn:Disconnect()
 			conn = nil
@@ -62,8 +66,16 @@ return function(deps)
 	end
 
 	function instantprompts.isRunning(): boolean
+		local owner = util.ownerOf("conn_instantprompts")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return conn ~= nil
 	end
+
+	IMPL.start = instantprompts.start
+	IMPL.stop = instantprompts.stop
+	IMPL.isRunning = instantprompts.isRunning
 
 	return instantprompts
 end

@@ -919,5 +919,141 @@ return function(deps)
 		return nil
 	end
 
+	-- Single-owner control channel for listener modules (reload-safety v2).
+	--
+	-- Verified facts (client 9564, 2026-10-12):
+	--   * live-reload's teardown disconnects the PREVIOUS labeled run's raw
+	--     connections before the new run starts (a BindableEvent handler
+	--     from a replaced run stopped answering; LocalPlayer.Idled went
+	--     from 1 connection to 0 while the tokens still said "owned" - the
+	--     bug that let the 20-min idle kick through).
+	--   * manual loadstring runs are never torn down: their listeners live
+	--     until the next rejoin.
+	--   * neither STATE (it leaks into manual runs) nor chunk source
+	--     (everything reports "loadstring") can tell the two apart.
+	-- So ownership is decided by PROBING: fire a shared BindableEvent and
+	-- check whether the owner's handler echoes a marker back. Alive =>
+	-- defer (the owner runs the one real listener, we steer it through its
+	-- controller). Dead or absent => claim and connect fresh. Old bare
+	-- `true` tokens (bundles shipped before this channel) are treated as
+	-- alive - they only come from manual runs of the old code, which are
+	-- never torn down - and the loader clears them after it shuts that run
+	-- down at boot, so a fresh claim is always possible.
+	--
+	-- Sentinel for "defer to an owner with no controller": every method is
+	-- a no-op so callers can delegate blindly.
+	local DEFER: any = setmetatable({}, {
+		__index = function()
+			return function() end
+		end,
+	})
+
+	local function ownerAlive(env: any, key: string): boolean
+		local beat = env["ParalyzBeat_" .. key]
+		if beat == nil then
+			return false
+		end
+		local marker = {}
+		env["ParalyzProbe_" .. key] = marker
+		local ok = pcall(function()
+			beat:Fire()
+		end)
+		return ok and env["ParalyzResp_" .. key] == marker
+	end
+
+	local function claimChannel(env: any, key: string, impl: any)
+		local beat = env["ParalyzBeat_" .. key]
+		if beat == nil then
+			beat = Instance.new("BindableEvent")
+			env["ParalyzBeat_" .. key] = beat
+		end
+		env["ParalyzBeatConn_" .. key] = beat.Event:Connect(function()
+			env["ParalyzResp_" .. key] = env["ParalyzProbe_" .. key]
+		end)
+		env["ParalyzOwn_" .. key] = { claimed = true }
+		env["ParalyzCtl_" .. key] = impl
+	end
+
+	-- start(): claim or defer. Returns the impl the caller must obey -
+	-- its own when it owns (or just claimed), the live owner's otherwise.
+	function util.singleOwner(key: string, impl: any): any
+		local env: any = getgenv()
+		local owner = env["ParalyzOwn_" .. key]
+		if owner == nil then
+			claimChannel(env, key, impl)
+			return impl
+		end
+		if owner == true then
+			return env["ParalyzCtl_" .. key] or DEFER -- pre-channel run
+		end
+		if ownerAlive(env, key) then
+			return env["ParalyzCtl_" .. key] or DEFER
+		end
+		claimChannel(env, key, impl) -- the owner's run was torn down
+		return impl
+	end
+
+	-- stop(): NEVER claims - a stop during shutdown must not create a
+	-- channel that later runs defer to. Returns impl (we own it: run the
+	-- local stop), another impl (delegate to the live owner), or nil
+	-- (nobody is listening, nothing to stop).
+	function util.stopOwner(key: string, impl: any): any?
+		local env: any = getgenv()
+		local owner = env["ParalyzOwn_" .. key]
+		if owner == nil or owner == true then
+			return nil
+		end
+		if not ownerAlive(env, key) then
+			return nil
+		end
+		local ctl = env["ParalyzCtl_" .. key]
+		if ctl == nil or ctl == impl then
+			return impl
+		end
+		return ctl
+	end
+
+	-- Read-only view of util.singleOwner: the live owner's controller, or
+	-- nil when nobody is listening (status probes never claim).
+	function util.ownerOf(key: string): any?
+		local env: any = getgenv()
+		local owner = env["ParalyzOwn_" .. key]
+		if owner == nil or owner == true then
+			return nil
+		end
+		if not ownerAlive(env, key) then
+			return nil
+		end
+		return env["ParalyzCtl_" .. key]
+	end
+
+	-- Loader shutdown only: release every channel this run claims so the
+	-- next run (manual or live-reload) claims fresh instead of deferring
+	-- to an unloaded one.
+	function util.releaseOwners()
+		local env: any = getgenv()
+		for name in pairs(env) do
+			if type(name) == "string" and name:sub(1, 11) == "ParalyzOwn_" then
+				local key = name:sub(12)
+				pcall(function()
+					local conn = env["ParalyzBeatConn_" .. key]
+					if conn then
+						conn:Disconnect()
+					end
+					local beat = env["ParalyzBeat_" .. key]
+					if beat then
+						beat:Destroy()
+					end
+				end)
+				env[name] = nil
+				env["ParalyzCtl_" .. key] = nil
+				env["ParalyzBeat_" .. key] = nil
+				env["ParalyzBeatConn_" .. key] = nil
+				env["ParalyzProbe_" .. key] = nil
+				env["ParalyzResp_" .. key] = nil
+			end
+		end
+	end
+
 	return util
 end

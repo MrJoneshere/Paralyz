@@ -7,7 +7,7 @@
 -- Loadstring one-liner (once the repo is public):
 --   loadstring(game:HttpGet("https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/loader.luau"))()
 
-local VERSION = "0.2.0"
+local VERSION = "0.2.1"
 local BASE = "https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/src/"
 
 -- The bundler replaces this line with a literal table of module sources.
@@ -39,10 +39,11 @@ return function(deps)
 
 	local conn: RBXScriptConnection? = nil
 	local cancelled = 0
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 
 	local function onIdle()
 		cancelled += 1
@@ -56,23 +57,26 @@ return function(deps)
 	end
 
 	function antiafk.start()
-		if conn then
+		local ctl = util.singleOwner("conn_antiafk", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live Idled handler
 			return
 		end
-		if not owns then
-			-- Reload-safety: stacked Idled handlers are harmless but each
-			-- would toast; oldest generation owns it forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_conn_antiafk"] then
-				return
-			end
-			env["ParalyzOwn_conn_antiafk"] = true
-			owns = true
+		if conn then
+			return
 		end
 		conn = Players.LocalPlayer.Idled:Connect(onIdle)
 	end
 
 	function antiafk.stop()
+		local ctl = util.stopOwner("conn_antiafk", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		if conn then
 			conn:Disconnect()
 			conn = nil
@@ -80,12 +84,25 @@ return function(deps)
 	end
 
 	function antiafk.isRunning(): boolean
+		local owner = util.ownerOf("conn_antiafk")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return conn ~= nil
 	end
 
 	function antiafk.stats(): string
+		local owner = util.ownerOf("conn_antiafk")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.stats()
+		end
 		return string.format("%d kicks cancelled", cancelled)
 	end
+
+	IMPL.start = antiafk.start
+	IMPL.stop = antiafk.stop
+	IMPL.isRunning = antiafk.isRunning
+	IMPL.stats = antiafk.stats
 
 	return antiafk
 end
@@ -1637,26 +1654,22 @@ return function(deps)
 		holding = false
 	end
 
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 
 	function holdmine.start()
+		local ctl = util.singleOwner("key_holdmine", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live click listeners
+			return
+		end
 		if started then
 			return
 		end
 		started = true
-		if not owns then
-			-- Reload-safety: stacked click listeners multi-swing the
-			-- pickaxe (the character glitch). Oldest generation owns it.
-			local env: any = getgenv()
-			if env["ParalyzOwn_key_holdmine"] then
-				return
-			end
-			env["ParalyzOwn_key_holdmine"] = true
-			owns = true
-		end
 		beganConn = UIS.InputBegan:Connect(function(input, gameProcessed)
 			if gameProcessed or holding then
 				return
@@ -1674,6 +1687,14 @@ return function(deps)
 	end
 
 	function holdmine.stop()
+		local ctl = util.stopOwner("key_holdmine", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		holding = false
 		if beganConn then
 			beganConn:Disconnect()
@@ -1687,8 +1708,16 @@ return function(deps)
 	end
 
 	function holdmine.isHolding(): boolean
+		local owner = util.ownerOf("key_holdmine")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isHolding()
+		end
 		return holding
 	end
+
+	IMPL.start = holdmine.start
+	IMPL.stop = holdmine.stop
+	IMPL.isHolding = holdmine.isHolding
 
 	return holdmine
 end
@@ -1773,26 +1802,22 @@ return function(deps)
 		end
 	end
 
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 
 	function hover.start()
+		local ctl = util.singleOwner("key_hover", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live F6 listener
+			return
+		end
 		if listening then
 			return
 		end
 		listening = true
-		if not owns then
-			-- Reload-safety: live-reload stacks listeners across reloads,
-			-- which multi-fires the key. Oldest generation owns F6 forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_key_hover"] then
-				return
-			end
-			env["ParalyzOwn_key_hover"] = true
-			owns = true
-		end
 		-- Not gated on gameProcessed (same lesson as F7/F8): only a
 		-- focused text box blocks the key.
 		conn = UIS.InputBegan:Connect(function(input)
@@ -1813,6 +1838,14 @@ return function(deps)
 	end
 
 	function hover.stop()
+		local ctl = util.stopOwner("key_hover", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		hovering = false
 		listening = false
 		release()
@@ -1827,12 +1860,25 @@ return function(deps)
 	end
 
 	function hover.isRunning(): boolean
+		local owner = util.ownerOf("key_hover")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return listening
 	end
 
 	function hover.isHovering(): boolean
+		local owner = util.ownerOf("key_hover")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isHovering()
+		end
 		return hovering
 	end
+
+	IMPL.start = hover.start
+	IMPL.stop = hover.stop
+	IMPL.isRunning = hover.isRunning
+	IMPL.isHovering = hover.isHovering
 
 	return hover
 end
@@ -1854,6 +1900,9 @@ end
 --     the connection or spam errors.
 --   * start() is idempotent (conn guard), stop() disconnects cleanly - same
 --     reconnect-first shape as IY's execCmd("uninstantproximityprompts").
+--   * util.singleOwner: after a live-reload the OLDER generation still holds
+--     the one real connection, so start/stop/isRunning delegate to it and the
+--     reloaded menu keeps steering that connection instead of a dead local.
 
 return function(deps)
 	local util = deps.util
@@ -1862,16 +1911,19 @@ return function(deps)
 
 	local PPS = game:GetService("ProximityPromptService")
 	local conn: RBXScriptConnection? = nil
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner (owner identity).
+	local IMPL: any = {}
 
 	local function fire(prompt: ProximityPrompt)
 		pcall(fireproximityprompt, prompt)
 	end
 
 	function instantprompts.start()
+		local ctl = util.singleOwner("conn_instantprompts", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live connection
+			return
+		end
 		if conn then
 			return
 		end
@@ -1881,20 +1933,18 @@ return function(deps)
 			end
 			return
 		end
-		if not owns then
-			-- Reload-safety: stacked hold-began connections multi-fire
-			-- every prompt. Oldest generation owns it forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_conn_instantprompts"] then
-				return
-			end
-			env["ParalyzOwn_conn_instantprompts"] = true
-			owns = true
-		end
 		conn = PPS.PromptButtonHoldBegan:Connect(fire)
 	end
 
 	function instantprompts.stop()
+		local ctl = util.stopOwner("conn_instantprompts", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		if conn then
 			conn:Disconnect()
 			conn = nil
@@ -1902,8 +1952,16 @@ return function(deps)
 	end
 
 	function instantprompts.isRunning(): boolean
+		local owner = util.ownerOf("conn_instantprompts")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return conn ~= nil
 	end
+
+	IMPL.start = instantprompts.start
+	IMPL.stop = instantprompts.stop
+	IMPL.isRunning = instantprompts.isRunning
 
 	return instantprompts
 end
@@ -2501,10 +2559,11 @@ return function(deps)
 	local runId = 0 -- bumped every toggle; stale loops see a mismatch
 	local anchor: Vector3? = nil
 	local conn: RBXScriptConnection? = nil
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 	-- Cross-reload generation (see perf.luau): live-reload leaves old
 	-- threads/listeners running. Claim a generation per loop-start; loops
 	-- exit when superseded so swings never stack across reloads.
@@ -2732,20 +2791,15 @@ return function(deps)
 	end
 
 	function minekey.start()
+		local ctl = util.singleOwner("key_minekey", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live F7 listener
+			return
+		end
 		if listening then
 			return
 		end
 		listening = true
-		if not owns then
-			-- Reload-safety: stacked F7 listeners multi-click the pickaxe
-			-- (the character glitch). Oldest generation owns F7 forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_key_minekey"] then
-				return
-			end
-			env["ParalyzOwn_key_minekey"] = true
-			owns = true
-		end
 		-- Deliberately NOT gated on gameProcessed: GUIs and other hubs (IY)
 		-- claim keys and Roblox flags those presses processed, which silently
 		-- ate F7. Only a focused text box (typing) blocks the toggle now.
@@ -2761,6 +2815,15 @@ return function(deps)
 	end
 
 	function minekey.stop()
+		local ctl = util.stopOwner("key_minekey", IMPL)
+		if ctl == nil then
+			return -- nobody is listening (loops of a dead owner are gone
+			-- with their run, or were already invalidated by its own stop)
+		end
+		if ctl ~= IMPL then
+			ctl.stop() -- the owner's claimGen() invalidates every loop
+			return
+		end
 		runId = runId + 1
 		claimGen() -- invalidate any loop, including older generations
 		swinging = false
@@ -2775,16 +2838,34 @@ return function(deps)
 	end
 
 	function minekey.isRunning(): boolean
+		local owner = util.ownerOf("key_minekey")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return listening
 	end
 
 	function minekey.isSwinging(): boolean
+		local owner = util.ownerOf("key_minekey")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isSwinging()
+		end
 		return swinging
 	end
 
 	function minekey.getAnchor()
+		local owner = util.ownerOf("key_minekey")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.getAnchor()
+		end
 		return anchor
 	end
+
+	IMPL.start = minekey.start
+	IMPL.stop = minekey.stop
+	IMPL.isRunning = minekey.isRunning
+	IMPL.isSwinging = minekey.isSwinging
+	IMPL.getAnchor = minekey.getAnchor
 
 	return minekey
 end
@@ -4144,10 +4225,11 @@ return function(deps)
 	local listening = false
 	local autofiring = false
 	local conn: RBXScriptConnection? = nil
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 
 	local function nearestPrompt(): ProximityPrompt?
 		local plr = Players.LocalPlayer
@@ -4208,6 +4290,11 @@ return function(deps)
 	end
 
 	function promptkey.start()
+		local ctl = util.singleOwner("key_promptkey", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live F8 listener
+			return
+		end
 		if listening then
 			return
 		end
@@ -4218,16 +4305,6 @@ return function(deps)
 			return
 		end
 		listening = true
-		if not owns then
-			-- Reload-safety: live-reload stacks listeners across reloads,
-			-- which multi-fires the key. Oldest generation owns F8 forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_key_promptkey"] then
-				return
-			end
-			env["ParalyzOwn_key_promptkey"] = true
-			owns = true
-		end
 		-- Not gated on gameProcessed (same lesson as minekey F7): GUIs claim
 		-- keys and mark them processed; only a focused text box blocks F8.
 		conn = UIS.InputBegan:Connect(function(input)
@@ -4242,6 +4319,14 @@ return function(deps)
 	end
 
 	function promptkey.stop()
+		local ctl = util.stopOwner("key_promptkey", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		autofiring = false
 		listening = false
 		if conn then
@@ -4251,12 +4336,25 @@ return function(deps)
 	end
 
 	function promptkey.isRunning(): boolean
+		local owner = util.ownerOf("key_promptkey")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return listening
 	end
 
 	function promptkey.isFiring(): boolean
+		local owner = util.ownerOf("key_promptkey")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isFiring()
+		end
 		return autofiring
 	end
+
+	IMPL.start = promptkey.start
+	IMPL.stop = promptkey.stop
+	IMPL.isRunning = promptkey.isRunning
+	IMPL.isFiring = promptkey.isFiring
 
 	return promptkey
 end
@@ -4549,10 +4647,11 @@ return function(deps)
 	local savedCFrame: CFrame? = nil
 	local platform: BasePart? = nil
 	local charConn: RBXScriptConnection? = nil
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 
 	local function charParts()
 		local char = Players.LocalPlayer.Character
@@ -4685,20 +4784,15 @@ return function(deps)
 	end
 
 	function safezone.start()
+		local ctl = util.singleOwner("conn_safezone", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation owns the CharacterAdded handler
+			return
+		end
 		if listening then
 			return
 		end
 		listening = true
-		if not owns then
-			-- Reload-safety: stacked CharacterAdded handlers all fire on
-			-- death. Oldest generation owns it forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_conn_safezone"] then
-				return
-			end
-			env["ParalyzOwn_conn_safezone"] = true
-			owns = true
-		end
 		-- No keybind (user order): the Travel tab toggle owns on/off.
 		charConn = Players.LocalPlayer.CharacterAdded:Connect(function()
 			if away then
@@ -4710,6 +4804,14 @@ return function(deps)
 	end
 
 	function safezone.stop()
+		local ctl = util.stopOwner("conn_safezone", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		if away then
 			local saved = savedCFrame
 			away = false
@@ -4726,15 +4828,39 @@ return function(deps)
 		end
 	end
 
+	function safezone.toggle()
+		-- The platform + away state belong to whichever generation is the
+		-- owner, so a toggle from a reloaded menu must run THERE - otherwise
+		-- isOn() would disagree with where the character actually is.
+		local ctl = util.singleOwner("conn_safezone", IMPL)
+		if ctl ~= IMPL then
+			ctl.toggle()
+			return
+		end
+		toggle()
+	end
+
 	function safezone.isRunning(): boolean
+		local owner = util.ownerOf("conn_safezone")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return listening
 	end
 
 	function safezone.isOn(): boolean
+		local owner = util.ownerOf("conn_safezone")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isOn()
+		end
 		return away
 	end
 
-	safezone.toggle = toggle
+	IMPL.start = safezone.start
+	IMPL.stop = safezone.stop
+	IMPL.toggle = safezone.toggle
+	IMPL.isRunning = safezone.isRunning
+	IMPL.isOn = safezone.isOn
 
 	return safezone
 end
@@ -6468,6 +6594,142 @@ return function(deps)
 		return nil
 	end
 
+	-- Single-owner control channel for listener modules (reload-safety v2).
+	--
+	-- Verified facts (client 9564, 2026-10-12):
+	--   * live-reload's teardown disconnects the PREVIOUS labeled run's raw
+	--     connections before the new run starts (a BindableEvent handler
+	--     from a replaced run stopped answering; LocalPlayer.Idled went
+	--     from 1 connection to 0 while the tokens still said "owned" - the
+	--     bug that let the 20-min idle kick through).
+	--   * manual loadstring runs are never torn down: their listeners live
+	--     until the next rejoin.
+	--   * neither STATE (it leaks into manual runs) nor chunk source
+	--     (everything reports "loadstring") can tell the two apart.
+	-- So ownership is decided by PROBING: fire a shared BindableEvent and
+	-- check whether the owner's handler echoes a marker back. Alive =>
+	-- defer (the owner runs the one real listener, we steer it through its
+	-- controller). Dead or absent => claim and connect fresh. Old bare
+	-- `true` tokens (bundles shipped before this channel) are treated as
+	-- alive - they only come from manual runs of the old code, which are
+	-- never torn down - and the loader clears them after it shuts that run
+	-- down at boot, so a fresh claim is always possible.
+	--
+	-- Sentinel for "defer to an owner with no controller": every method is
+	-- a no-op so callers can delegate blindly.
+	local DEFER: any = setmetatable({}, {
+		__index = function()
+			return function() end
+		end,
+	})
+
+	local function ownerAlive(env: any, key: string): boolean
+		local beat = env["ParalyzBeat_" .. key]
+		if beat == nil then
+			return false
+		end
+		local marker = {}
+		env["ParalyzProbe_" .. key] = marker
+		local ok = pcall(function()
+			beat:Fire()
+		end)
+		return ok and env["ParalyzResp_" .. key] == marker
+	end
+
+	local function claimChannel(env: any, key: string, impl: any)
+		local beat = env["ParalyzBeat_" .. key]
+		if beat == nil then
+			beat = Instance.new("BindableEvent")
+			env["ParalyzBeat_" .. key] = beat
+		end
+		env["ParalyzBeatConn_" .. key] = beat.Event:Connect(function()
+			env["ParalyzResp_" .. key] = env["ParalyzProbe_" .. key]
+		end)
+		env["ParalyzOwn_" .. key] = { claimed = true }
+		env["ParalyzCtl_" .. key] = impl
+	end
+
+	-- start(): claim or defer. Returns the impl the caller must obey -
+	-- its own when it owns (or just claimed), the live owner's otherwise.
+	function util.singleOwner(key: string, impl: any): any
+		local env: any = getgenv()
+		local owner = env["ParalyzOwn_" .. key]
+		if owner == nil then
+			claimChannel(env, key, impl)
+			return impl
+		end
+		if owner == true then
+			return env["ParalyzCtl_" .. key] or DEFER -- pre-channel run
+		end
+		if ownerAlive(env, key) then
+			return env["ParalyzCtl_" .. key] or DEFER
+		end
+		claimChannel(env, key, impl) -- the owner's run was torn down
+		return impl
+	end
+
+	-- stop(): NEVER claims - a stop during shutdown must not create a
+	-- channel that later runs defer to. Returns impl (we own it: run the
+	-- local stop), another impl (delegate to the live owner), or nil
+	-- (nobody is listening, nothing to stop).
+	function util.stopOwner(key: string, impl: any): any?
+		local env: any = getgenv()
+		local owner = env["ParalyzOwn_" .. key]
+		if owner == nil or owner == true then
+			return nil
+		end
+		if not ownerAlive(env, key) then
+			return nil
+		end
+		local ctl = env["ParalyzCtl_" .. key]
+		if ctl == nil or ctl == impl then
+			return impl
+		end
+		return ctl
+	end
+
+	-- Read-only view of util.singleOwner: the live owner's controller, or
+	-- nil when nobody is listening (status probes never claim).
+	function util.ownerOf(key: string): any?
+		local env: any = getgenv()
+		local owner = env["ParalyzOwn_" .. key]
+		if owner == nil or owner == true then
+			return nil
+		end
+		if not ownerAlive(env, key) then
+			return nil
+		end
+		return env["ParalyzCtl_" .. key]
+	end
+
+	-- Loader shutdown only: release every channel this run claims so the
+	-- next run (manual or live-reload) claims fresh instead of deferring
+	-- to an unloaded one.
+	function util.releaseOwners()
+		local env: any = getgenv()
+		for name in pairs(env) do
+			if type(name) == "string" and name:sub(1, 11) == "ParalyzOwn_" then
+				local key = name:sub(12)
+				pcall(function()
+					local conn = env["ParalyzBeatConn_" .. key]
+					if conn then
+						conn:Disconnect()
+					end
+					local beat = env["ParalyzBeat_" .. key]
+					if beat then
+						beat:Destroy()
+					end
+				end)
+				env[name] = nil
+				env["ParalyzCtl_" .. key] = nil
+				env["ParalyzBeat_" .. key] = nil
+				env["ParalyzBeatConn_" .. key] = nil
+				env["ParalyzProbe_" .. key] = nil
+				env["ParalyzResp_" .. key] = nil
+			end
+		end
+	end
+
 	return util
 end
 ]==],
@@ -6507,6 +6769,18 @@ local previous = (getgenv and getgenv().Paralyz) or nil
 if previous and previous.shutdown then
 	pcall(previous.shutdown)
 end
+-- Pre-channel runs (bundles shipped before the liveness channel in
+-- util.luau) leave bare `true` ownership tokens their shutdown cannot
+-- release. Their listeners were just stopped above, so drop the tokens:
+-- the first claim below must find the channel clean.
+pcall(function()
+	local env: any = getgenv()
+	for name, value in pairs(env) do
+		if type(name) == "string" and name:sub(1, 11) == "ParalyzOwn_" and value == true then
+			env[name] = nil
+		end
+	end
+end)
 
 -------------------------------------------------------------- build the modules
 local config = fetchModule("config") -- config and state are data, not factories
@@ -6949,9 +7223,12 @@ local function applyAntiIdle(v)
 	end
 end
 
--- Black screen: a full-viewport veil above everything (Rayfield included).
--- Frames are transparent to input unless Active, so the menu stays clickable
--- underneath even while the screen looks dead.
+-- Black screen: a full-viewport veil that hides the GAME but never the
+-- Paralyz menu (user order 2026-10-12: "it should not be on top of the
+-- paralyz gui"). The veil is placed one DisplayOrder below Rayfield's
+-- window gui, which still lands above the game HUD (orders 0..90000), so
+-- the blackout hides the world while the menu stays visible and clickable.
+-- Frames are transparent to input unless Active, so clicks pass through.
 local blackGui: ScreenGui? = nil
 
 local function setBlackScreen(on: boolean)
@@ -6959,7 +7236,6 @@ local function setBlackScreen(on: boolean)
 		if not blackGui then
 			local gui = Instance.new("ScreenGui")
 			gui.Name = "ParalyzBlackout"
-			gui.DisplayOrder = 9999999
 			gui.IgnoreGuiInset = true
 			gui.ResetOnSpawn = false
 			gui.Parent = game:GetService("CoreGui")
@@ -6971,6 +7247,19 @@ local function setBlackScreen(on: boolean)
 			frame.Parent = gui
 			blackGui = gui
 		end
+		-- Sit exactly one layer under the menu's gui (found by the window
+		-- element Rayfield created from our name). Falls back to a value
+		-- above every observed game HUD order if the menu cannot be found.
+		pcall(function()
+			local menuOrder = nil
+			for _, d in ipairs(game:GetService("CoreGui"):GetDescendants()) do
+				if d.Name == "Paralyz" and d.Parent and d.Parent:IsA("ScreenGui") then
+					menuOrder = d.Parent.DisplayOrder
+					break
+				end
+			end
+			blackGui.DisplayOrder = if menuOrder and menuOrder > 0 then menuOrder - 1 else 99998
+		end)
 		blackGui.Enabled = true
 	elseif blackGui then
 		blackGui.Enabled = false
@@ -7269,6 +7558,7 @@ shutdown = function()
 	antiafk.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
+	util.releaseOwners() -- hand every ownership channel to the next run
 	if blackGui then
 		pcall(function()
 			blackGui:Destroy()

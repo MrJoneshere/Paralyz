@@ -47,26 +47,22 @@ return function(deps)
 		holding = false
 	end
 
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 
 	function holdmine.start()
+		local ctl = util.singleOwner("key_holdmine", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live click listeners
+			return
+		end
 		if started then
 			return
 		end
 		started = true
-		if not owns then
-			-- Reload-safety: stacked click listeners multi-swing the
-			-- pickaxe (the character glitch). Oldest generation owns it.
-			local env: any = getgenv()
-			if env["ParalyzOwn_key_holdmine"] then
-				return
-			end
-			env["ParalyzOwn_key_holdmine"] = true
-			owns = true
-		end
 		beganConn = UIS.InputBegan:Connect(function(input, gameProcessed)
 			if gameProcessed or holding then
 				return
@@ -84,6 +80,14 @@ return function(deps)
 	end
 
 	function holdmine.stop()
+		local ctl = util.stopOwner("key_holdmine", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		holding = false
 		if beganConn then
 			beganConn:Disconnect()
@@ -97,8 +101,16 @@ return function(deps)
 	end
 
 	function holdmine.isHolding(): boolean
+		local owner = util.ownerOf("key_holdmine")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isHolding()
+		end
 		return holding
 	end
+
+	IMPL.start = holdmine.start
+	IMPL.stop = holdmine.stop
+	IMPL.isHolding = holdmine.isHolding
 
 	return holdmine
 end

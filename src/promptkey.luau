@@ -28,10 +28,11 @@ return function(deps)
 	local listening = false
 	local autofiring = false
 	local conn: RBXScriptConnection? = nil
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 
 	local function nearestPrompt(): ProximityPrompt?
 		local plr = Players.LocalPlayer
@@ -92,6 +93,11 @@ return function(deps)
 	end
 
 	function promptkey.start()
+		local ctl = util.singleOwner("key_promptkey", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live F8 listener
+			return
+		end
 		if listening then
 			return
 		end
@@ -102,16 +108,6 @@ return function(deps)
 			return
 		end
 		listening = true
-		if not owns then
-			-- Reload-safety: live-reload stacks listeners across reloads,
-			-- which multi-fires the key. Oldest generation owns F8 forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_key_promptkey"] then
-				return
-			end
-			env["ParalyzOwn_key_promptkey"] = true
-			owns = true
-		end
 		-- Not gated on gameProcessed (same lesson as minekey F7): GUIs claim
 		-- keys and mark them processed; only a focused text box blocks F8.
 		conn = UIS.InputBegan:Connect(function(input)
@@ -126,6 +122,14 @@ return function(deps)
 	end
 
 	function promptkey.stop()
+		local ctl = util.stopOwner("key_promptkey", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		autofiring = false
 		listening = false
 		if conn then
@@ -135,12 +139,25 @@ return function(deps)
 	end
 
 	function promptkey.isRunning(): boolean
+		local owner = util.ownerOf("key_promptkey")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return listening
 	end
 
 	function promptkey.isFiring(): boolean
+		local owner = util.ownerOf("key_promptkey")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isFiring()
+		end
 		return autofiring
 	end
+
+	IMPL.start = promptkey.start
+	IMPL.stop = promptkey.stop
+	IMPL.isRunning = promptkey.isRunning
+	IMPL.isFiring = promptkey.isFiring
 
 	return promptkey
 end

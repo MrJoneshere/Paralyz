@@ -77,26 +77,22 @@ return function(deps)
 		end
 	end
 
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 
 	function hover.start()
+		local ctl = util.singleOwner("key_hover", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live F6 listener
+			return
+		end
 		if listening then
 			return
 		end
 		listening = true
-		if not owns then
-			-- Reload-safety: live-reload stacks listeners across reloads,
-			-- which multi-fires the key. Oldest generation owns F6 forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_key_hover"] then
-				return
-			end
-			env["ParalyzOwn_key_hover"] = true
-			owns = true
-		end
 		-- Not gated on gameProcessed (same lesson as F7/F8): only a
 		-- focused text box blocks the key.
 		conn = UIS.InputBegan:Connect(function(input)
@@ -117,6 +113,14 @@ return function(deps)
 	end
 
 	function hover.stop()
+		local ctl = util.stopOwner("key_hover", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		hovering = false
 		listening = false
 		release()
@@ -131,12 +135,25 @@ return function(deps)
 	end
 
 	function hover.isRunning(): boolean
+		local owner = util.ownerOf("key_hover")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return listening
 	end
 
 	function hover.isHovering(): boolean
+		local owner = util.ownerOf("key_hover")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isHovering()
+		end
 		return hovering
 	end
+
+	IMPL.start = hover.start
+	IMPL.stop = hover.stop
+	IMPL.isRunning = hover.isRunning
+	IMPL.isHovering = hover.isHovering
 
 	return hover
 end

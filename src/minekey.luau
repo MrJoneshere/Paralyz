@@ -66,10 +66,11 @@ return function(deps)
 	local runId = 0 -- bumped every toggle; stale loops see a mismatch
 	local anchor: Vector3? = nil
 	local conn: RBXScriptConnection? = nil
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 	-- Cross-reload generation (see perf.luau): live-reload leaves old
 	-- threads/listeners running. Claim a generation per loop-start; loops
 	-- exit when superseded so swings never stack across reloads.
@@ -297,20 +298,15 @@ return function(deps)
 	end
 
 	function minekey.start()
+		local ctl = util.singleOwner("key_minekey", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live F7 listener
+			return
+		end
 		if listening then
 			return
 		end
 		listening = true
-		if not owns then
-			-- Reload-safety: stacked F7 listeners multi-click the pickaxe
-			-- (the character glitch). Oldest generation owns F7 forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_key_minekey"] then
-				return
-			end
-			env["ParalyzOwn_key_minekey"] = true
-			owns = true
-		end
 		-- Deliberately NOT gated on gameProcessed: GUIs and other hubs (IY)
 		-- claim keys and Roblox flags those presses processed, which silently
 		-- ate F7. Only a focused text box (typing) blocks the toggle now.
@@ -326,6 +322,15 @@ return function(deps)
 	end
 
 	function minekey.stop()
+		local ctl = util.stopOwner("key_minekey", IMPL)
+		if ctl == nil then
+			return -- nobody is listening (loops of a dead owner are gone
+			-- with their run, or were already invalidated by its own stop)
+		end
+		if ctl ~= IMPL then
+			ctl.stop() -- the owner's claimGen() invalidates every loop
+			return
+		end
 		runId = runId + 1
 		claimGen() -- invalidate any loop, including older generations
 		swinging = false
@@ -340,16 +345,34 @@ return function(deps)
 	end
 
 	function minekey.isRunning(): boolean
+		local owner = util.ownerOf("key_minekey")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return listening
 	end
 
 	function minekey.isSwinging(): boolean
+		local owner = util.ownerOf("key_minekey")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isSwinging()
+		end
 		return swinging
 	end
 
 	function minekey.getAnchor()
+		local owner = util.ownerOf("key_minekey")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.getAnchor()
+		end
 		return anchor
 	end
+
+	IMPL.start = minekey.start
+	IMPL.stop = minekey.stop
+	IMPL.isRunning = minekey.isRunning
+	IMPL.isSwinging = minekey.isSwinging
+	IMPL.getAnchor = minekey.getAnchor
 
 	return minekey
 end

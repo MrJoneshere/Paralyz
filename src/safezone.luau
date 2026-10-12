@@ -38,10 +38,11 @@ return function(deps)
 	local savedCFrame: CFrame? = nil
 	local platform: BasePart? = nil
 	local charConn: RBXScriptConnection? = nil
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 
 	local function charParts()
 		local char = Players.LocalPlayer.Character
@@ -174,20 +175,15 @@ return function(deps)
 	end
 
 	function safezone.start()
+		local ctl = util.singleOwner("conn_safezone", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation owns the CharacterAdded handler
+			return
+		end
 		if listening then
 			return
 		end
 		listening = true
-		if not owns then
-			-- Reload-safety: stacked CharacterAdded handlers all fire on
-			-- death. Oldest generation owns it forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_conn_safezone"] then
-				return
-			end
-			env["ParalyzOwn_conn_safezone"] = true
-			owns = true
-		end
 		-- No keybind (user order): the Travel tab toggle owns on/off.
 		charConn = Players.LocalPlayer.CharacterAdded:Connect(function()
 			if away then
@@ -199,6 +195,14 @@ return function(deps)
 	end
 
 	function safezone.stop()
+		local ctl = util.stopOwner("conn_safezone", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		if away then
 			local saved = savedCFrame
 			away = false
@@ -215,15 +219,39 @@ return function(deps)
 		end
 	end
 
+	function safezone.toggle()
+		-- The platform + away state belong to whichever generation is the
+		-- owner, so a toggle from a reloaded menu must run THERE - otherwise
+		-- isOn() would disagree with where the character actually is.
+		local ctl = util.singleOwner("conn_safezone", IMPL)
+		if ctl ~= IMPL then
+			ctl.toggle()
+			return
+		end
+		toggle()
+	end
+
 	function safezone.isRunning(): boolean
+		local owner = util.ownerOf("conn_safezone")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return listening
 	end
 
 	function safezone.isOn(): boolean
+		local owner = util.ownerOf("conn_safezone")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isOn()
+		end
 		return away
 	end
 
-	safezone.toggle = toggle
+	IMPL.start = safezone.start
+	IMPL.stop = safezone.stop
+	IMPL.toggle = safezone.toggle
+	IMPL.isRunning = safezone.isRunning
+	IMPL.isOn = safezone.isOn
 
 	return safezone
 end

@@ -7,7 +7,7 @@
 -- Loadstring one-liner (once the repo is public):
 --   loadstring(game:HttpGet("https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/loader.luau"))()
 
-local VERSION = "0.2.0"
+local VERSION = "0.2.1"
 local BASE = "https://raw.githubusercontent.com/MrJoneshere/Paralyz/main/src/"
 
 -- The bundler replaces this line with a literal table of module sources.
@@ -47,6 +47,18 @@ local previous = (getgenv and getgenv().Paralyz) or nil
 if previous and previous.shutdown then
 	pcall(previous.shutdown)
 end
+-- Pre-channel runs (bundles shipped before the liveness channel in
+-- util.luau) leave bare `true` ownership tokens their shutdown cannot
+-- release. Their listeners were just stopped above, so drop the tokens:
+-- the first claim below must find the channel clean.
+pcall(function()
+	local env: any = getgenv()
+	for name, value in pairs(env) do
+		if type(name) == "string" and name:sub(1, 11) == "ParalyzOwn_" and value == true then
+			env[name] = nil
+		end
+	end
+end)
 
 -------------------------------------------------------------- build the modules
 local config = fetchModule("config") -- config and state are data, not factories
@@ -489,9 +501,12 @@ local function applyAntiIdle(v)
 	end
 end
 
--- Black screen: a full-viewport veil above everything (Rayfield included).
--- Frames are transparent to input unless Active, so the menu stays clickable
--- underneath even while the screen looks dead.
+-- Black screen: a full-viewport veil that hides the GAME but never the
+-- Paralyz menu (user order 2026-10-12: "it should not be on top of the
+-- paralyz gui"). The veil is placed one DisplayOrder below Rayfield's
+-- window gui, which still lands above the game HUD (orders 0..90000), so
+-- the blackout hides the world while the menu stays visible and clickable.
+-- Frames are transparent to input unless Active, so clicks pass through.
 local blackGui: ScreenGui? = nil
 
 local function setBlackScreen(on: boolean)
@@ -499,7 +514,6 @@ local function setBlackScreen(on: boolean)
 		if not blackGui then
 			local gui = Instance.new("ScreenGui")
 			gui.Name = "ParalyzBlackout"
-			gui.DisplayOrder = 9999999
 			gui.IgnoreGuiInset = true
 			gui.ResetOnSpawn = false
 			gui.Parent = game:GetService("CoreGui")
@@ -511,6 +525,19 @@ local function setBlackScreen(on: boolean)
 			frame.Parent = gui
 			blackGui = gui
 		end
+		-- Sit exactly one layer under the menu's gui (found by the window
+		-- element Rayfield created from our name). Falls back to a value
+		-- above every observed game HUD order if the menu cannot be found.
+		pcall(function()
+			local menuOrder = nil
+			for _, d in ipairs(game:GetService("CoreGui"):GetDescendants()) do
+				if d.Name == "Paralyz" and d.Parent and d.Parent:IsA("ScreenGui") then
+					menuOrder = d.Parent.DisplayOrder
+					break
+				end
+			end
+			blackGui.DisplayOrder = if menuOrder and menuOrder > 0 then menuOrder - 1 else 99998
+		end)
 		blackGui.Enabled = true
 	elseif blackGui then
 		blackGui.Enabled = false
@@ -809,6 +836,7 @@ shutdown = function()
 	antiafk.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
+	util.releaseOwners() -- hand every ownership channel to the next run
 	if blackGui then
 		pcall(function()
 			blackGui:Destroy()

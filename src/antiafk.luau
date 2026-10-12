@@ -24,10 +24,11 @@ return function(deps)
 
 	local conn: RBXScriptConnection? = nil
 	local cancelled = 0
-	-- Ownership claim for the single-owner listener pattern: the env token
-	-- stops OTHER generations from stacking, this flag keeps stop() ->
-	-- start() working inside the owning generation.
-	local owns = false
+	-- Stable impl table handed to util.singleOwner: the first generation
+	-- to start owns the live listener, later generations (after a reload)
+	-- delegate start/stop/status to it, so the newest menu steers the one
+	-- connection that actually exists.
+	local IMPL: any = {}
 
 	local function onIdle()
 		cancelled += 1
@@ -41,23 +42,26 @@ return function(deps)
 	end
 
 	function antiafk.start()
-		if conn then
+		local ctl = util.singleOwner("conn_antiafk", IMPL)
+		if ctl ~= IMPL then
+			ctl.start() -- an older generation holds the live Idled handler
 			return
 		end
-		if not owns then
-			-- Reload-safety: stacked Idled handlers are harmless but each
-			-- would toast; oldest generation owns it forever.
-			local env: any = getgenv()
-			if env["ParalyzOwn_conn_antiafk"] then
-				return
-			end
-			env["ParalyzOwn_conn_antiafk"] = true
-			owns = true
+		if conn then
+			return
 		end
 		conn = Players.LocalPlayer.Idled:Connect(onIdle)
 	end
 
 	function antiafk.stop()
+		local ctl = util.stopOwner("conn_antiafk", IMPL)
+		if ctl == nil then
+			return -- nobody is listening
+		end
+		if ctl ~= IMPL then
+			ctl.stop()
+			return
+		end
 		if conn then
 			conn:Disconnect()
 			conn = nil
@@ -65,12 +69,25 @@ return function(deps)
 	end
 
 	function antiafk.isRunning(): boolean
+		local owner = util.ownerOf("conn_antiafk")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.isRunning()
+		end
 		return conn ~= nil
 	end
 
 	function antiafk.stats(): string
+		local owner = util.ownerOf("conn_antiafk")
+		if owner ~= nil and owner ~= IMPL then
+			return owner.stats()
+		end
 		return string.format("%d kicks cancelled", cancelled)
 	end
+
+	IMPL.start = antiafk.start
+	IMPL.stop = antiafk.stop
+	IMPL.isRunning = antiafk.isRunning
+	IMPL.stats = antiafk.stats
 
 	return antiafk
 end
