@@ -410,6 +410,22 @@ local entries = {
 			.. "Pickaxe & Rocket Launcher in credit shop).",
 	},
 	{
+		id = "hub-mining-protocol",
+		cat = "Hub",
+		title = "Mining: how swings reach the server",
+		keys = "mining swing pickaxe server handshake subplace dupe rapid fire converter",
+		body = "Measured 2026-10-12 (subplace 77683185698128): each swing is a server-driven "
+			.. "handshake - server fires Pickaxe to the client, the client replies with the "
+			.. "mouse-target rock, server validates ~30-stud range then rolls the drop. "
+			.. "Unsolicited rapid fires are ignored (tested 3x, zero response, no kick) - "
+			.. "swing rate is fully server-gated, one validated swing per ~0.85s is the "
+			.. "ceiling (F7 minekey). Prompts arrive in pairs ~150ms apart during active "
+			.. "swinging. Server mints every real juice (no client template exists) - "
+			.. "client-made copies can never sell. This subplace has planets 6/11-15 only; "
+			.. "City holds a ConverterMachine with a one-way 'Insert Moonjuice' prompt "
+			.. "(no client listener attached).",
+	},
+	{
 		id = "changelog-balance",
 		cat = "Change Log",
 		title = "Balance changes worth knowing",
