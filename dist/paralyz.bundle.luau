@@ -1369,6 +1369,90 @@ return function(deps)
 	return farm
 end
 ]==],
+	["flystand"] = [==[
+--!strict
+-- Paralyz / src/flystand.luau
+-- Upright character while flying (user request 2026-10-12):
+-- "when i fly my character starts to spin... make sure it stands like
+-- normal even when flying".
+--
+-- Diagnosis (live probe during the complaint):
+--   * Humanoid was in Enum.HumanoidStateType.Physics with a tipped-over
+--     HRP orientation (-49, -164, -105) - the ragdoll/physics state.
+--   * In Physics state the rig has no motor control: no walk animation,
+--     AutoRotate does nothing, and leftover angular momentum makes the
+--     character tumble/spin forever.
+--   * The game itself has NO character-fly implementation (the Events.Fly
+--     remote has zero client callers) - the user flies via their own
+--     hub (IY), which never restores the humanoid state afterwards.
+--
+-- Fix: an always-on 0.1s watchdog - while alive and unseated, leave
+-- Physics/PlatformStand via ChangeState(GettingUp) (character snaps
+-- upright, animations resume, AutoRotate faces movement again), and
+-- damp any rotational momentum (RotVelocity > 1 rad/s -> scaled down).
+-- Ground walking never trips it: a standing character is never in
+-- Physics state and its RotVelocity is ~0. Silent - no toast, no keybind.
+
+return function(deps)
+	local util = deps.util
+
+	local flystand = {}
+
+	local Players = game:GetService("Players")
+
+	local running = false
+	local CHECK = 0.1
+
+	local function watch()
+		while running do
+			task.wait(CHECK)
+			if not running then
+				break
+			end
+			local ok, err = pcall(function()
+				local char = Players.LocalPlayer.Character
+				if not char then
+					return
+				end
+				local hum = char:FindFirstChildOfClass("Humanoid")
+				local hrp = char:FindFirstChild("HumanoidRootPart")
+				if not (hum and hrp) or hum.Health <= 0 or hum.SeatPart then
+					return
+				end
+				local state = hum:GetState()
+				if state == Enum.HumanoidStateType.Physics or hum.PlatformStand then
+					hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+				end
+				local rv = hrp.RotVelocity
+				if rv.Magnitude > 1 then
+					hrp.RotVelocity = rv * 0.15
+				end
+			end)
+			if not ok then
+				warn("[Paralyz] flystand error: " .. tostring(err))
+			end
+		end
+	end
+
+	function flystand.start()
+		if running then
+			return
+		end
+		running = true
+		task.spawn(watch)
+	end
+
+	function flystand.stop()
+		running = false
+	end
+
+	function flystand.isRunning(): boolean
+		return running
+	end
+
+	return flystand
+end
+]==],
 	["holdmine"] = [==[
 --!strict
 -- Paralyz / src/holdmine.luau
@@ -1458,6 +1542,135 @@ return function(deps)
 	end
 
 	return holdmine
+end
+]==],
+	["hover"] = [==[
+--!strict
+-- Paralyz / src/hover.luau
+-- F6 hover hold (user request 2026-10-12): "while flying when i stop it
+-- doesnt just stop it falls very slowly" - freeze in place mid-air on
+-- demand.
+--
+-- Mechanic: on toggle, parent a BodyVelocity named ParalyzHover to the
+-- HumanoidRootPart - velocity (0,0,0) on all axes, MaxForce 1e6, P 1e4.
+-- That fully cancels gravity and momentum (their fly has no hold force
+-- when idle, so the character used to sink). Toggle off destroys it and
+-- normal physics resume exactly where you hang. Works with any flight:
+-- their hub's fly, the game's ship, or plain jumping off an asteroid.
+--
+-- Hidden keybind + toast, like F7/F8. F6 chosen because F9 opens the
+-- Roblox dev console. Skipped while seated (never fights a vehicle
+-- weld); auto-releases on respawn/character swap. stop() on unload
+-- always destroys the force.
+
+return function(deps)
+	local util = deps.util
+
+	local hover = {}
+
+	local KEY = Enum.KeyCode.F6
+
+	local UIS = game:GetService("UserInputService")
+	local Players = game:GetService("Players")
+
+	local listening = false
+	local hovering = false
+	local conn: RBXScriptConnection? = nil
+	local charConn: RBXScriptConnection? = nil
+	local bv: BodyVelocity? = nil
+
+	local function release()
+		if bv then
+			pcall(function()
+				bv:Destroy()
+			end)
+			bv = nil
+		end
+	end
+
+	-- Returns false when the character can't hover (seated / missing).
+	local function apply(): boolean
+		local char = Players.LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not (hrp and hum) or hum.Health <= 0 or hum.SeatPart then
+			return false
+		end
+		local v = Instance.new("BodyVelocity")
+		v.Name = "ParalyzHover"
+		v.Velocity = Vector3.zero
+		v.MaxForce = Vector3.new(1000000, 1000000, 1000000)
+		v.P = 10000
+		v.Parent = hrp
+		bv = v
+		return true
+	end
+
+	local function toggle()
+		if hovering then
+			hovering = false
+			release()
+		else
+			if not apply() then
+				if util and util.notify then
+					util.notify("Hover", "can't hover right now (seated or no character)")
+				end
+				return
+			end
+			hovering = true
+		end
+		if util and util.notify then
+			util.notify("Hover", hovering and "ON - frozen in place, F6 to release" or "OFF")
+		end
+	end
+
+	function hover.start()
+		if listening then
+			return
+		end
+		listening = true
+		-- Not gated on gameProcessed (same lesson as F7/F8): only a
+		-- focused text box blocks the key.
+		conn = UIS.InputBegan:Connect(function(input)
+			if input.KeyCode ~= KEY then
+				return
+			end
+			if UIS:GetFocusedTextBox() then
+				return
+			end
+			toggle()
+		end)
+		charConn = Players.LocalPlayer.CharacterAdded:Connect(function()
+			if hovering then
+				hovering = false
+				release()
+			end
+		end)
+	end
+
+	function hover.stop()
+		hovering = false
+		listening = false
+		release()
+		if conn then
+			conn:Disconnect()
+			conn = nil
+		end
+		if charConn then
+			charConn:Disconnect()
+			charConn = nil
+		end
+	end
+
+	function hover.isRunning(): boolean
+		return listening
+	end
+
+	function hover.isHovering(): boolean
+		return hovering
+	end
+
+	return hover
 end
 ]==],
 	["instantprompts"] = [==[
@@ -4714,6 +4927,14 @@ local knowledge = fetchModule("knowledge") -- data table, not a factory
 -- no toast. See src/noshake.luau.
 local noshake = fetchModule("noshake")({ util = util })
 noshake.start()
+-- Upright character watchdog: out of Physics state + spin damped every
+-- 0.1s so the avatar stands normally even while flying; see src/flystand.luau.
+local flystand = fetchModule("flystand")({ util = util })
+flystand.start()
+-- Hover hold: F6 freezes the character mid-air (cancels gravity + all
+-- momentum) - the fix for "fly stops = slow fall"; see src/hover.luau.
+local hover = fetchModule("hover")({ util = util })
+hover.start()
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -5379,6 +5600,8 @@ shutdown = function()
 	minekey.stop()
 	promptkey.stop()
 	noshake.stop()
+	flystand.stop()
+	hover.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -5415,6 +5638,8 @@ if getgenv then
 		minekey = minekey,
 		promptkey = promptkey,
 		noshake = noshake,
+		flystand = flystand,
+		hover = hover,
 		knowledge = knowledge,
 	}
 end

@@ -69,6 +69,14 @@ local knowledge = fetchModule("knowledge") -- data table, not a factory
 -- no toast. See src/noshake.luau.
 local noshake = fetchModule("noshake")({ util = util })
 noshake.start()
+-- Upright character watchdog: out of Physics state + spin damped every
+-- 0.1s so the avatar stands normally even while flying; see src/flystand.luau.
+local flystand = fetchModule("flystand")({ util = util })
+flystand.start()
+-- Hover hold: F6 freezes the character mid-air (cancels gravity + all
+-- momentum) - the fix for "fly stops = slow fall"; see src/hover.luau.
+local hover = fetchModule("hover")({ util = util })
+hover.start()
 
 --------------------------------------------------------------- Rayfield Gen2
 local okRayfield, Rayfield = pcall(function()
@@ -734,6 +742,8 @@ shutdown = function()
 	minekey.stop()
 	promptkey.stop()
 	noshake.stop()
+	flystand.stop()
+	hover.stop()
 	util.stopAim()
 	util.stop() -- disconnect the round-end Text listener
 	if blackGui then
@@ -770,6 +780,8 @@ if getgenv then
 		minekey = minekey,
 		promptkey = promptkey,
 		noshake = noshake,
+		flystand = flystand,
+		hover = hover,
 		knowledge = knowledge,
 	}
 end
